@@ -36,3 +36,29 @@ if err != nil {
 
 fmt.Printf("%s (%s)\n", data.IP, data.ASN)
 ```
+
+You can also use the error returned from the methods to determine whether it was
+a failure due to a rate limit. This package uses the
+[github.com/pkg/errors](https://github.com/pkg/errors) package for error
+handling, which allows you to wrap errors to provide more context. Using this
+functionality is entirely optional.
+
+```Go
+import "github.com/pkg/errors"
+
+data, err := ipd.Lookup("8.8.8.8")
+if err != nil {
+	// do a type assertion on the error
+	rerr, ok := errors.Cause(err).(interface{
+    	RateLimited() bool
+    })
+
+    if !ok {
+    	// this wasn't a failure from rate limiting
+    }
+
+    if rerr.RateLimited() {
+    	// we were rate limited
+    }
+}
+```

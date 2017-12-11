@@ -34,10 +34,23 @@ var userAgent = fmt.Sprintf(
 // Client is the interface to represent the functionality presented by the
 // https://ipdata.co API.
 type Client interface {
+	// Request uses the internal mechanics to make an HTTP request to the API
+	// and returns the HTTP response. This allows consumers of the API to
+	// implement their own behaviors.
+	Request(ip string) (*http.Response, error)
+
 	// Lookup takes an IP address to look up the details for. An empty string
 	// means you want the information about the current node's pubilc IP
 	// address.
 	Lookup(ip string) (IP, error)
+
+	// LookupRise takes an IP address to look up the details for. An empty
+	// string means you want the information about the current node's public IP
+	// address.
+	//
+	// This method is a little more performant than Lookup as it does not
+	// convert the RawIP struct to an IP struct.
+	LookupRaw(ip string) (RawIP, error)
 }
 
 type client struct {
@@ -54,6 +67,94 @@ func NewClient(apiKey string) Client {
 		e: apiEndpoint,
 		k: apiKey,
 	}
+}
+
+func (c client) Request(ip string) (*http.Response, error) {
+	// build request
+	req, err := newRequest(c.e+ip, c.k)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error building request to look up %s", ip)
+	}
+
+	// action request
+	resp, err := c.c.Do(req)
+	if err != nil {
+		return nil, errors.Wrapf(err, "http request to %q failed", resp.Request.URL.String())
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		// we can try and parse
+		return resp, nil
+	case 400, 403, 429:
+		// provide response body as error to consumer
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+		}
+
+		if resp.StatusCode == 403 {
+			return nil, errors.Errorf("request for %q failed (authentication failure): %s", ip, string(body))
+		}
+
+		if resp.StatusCode == 429 {
+			rerr := rateErr{r: true, m: string(body)}
+			return nil, errors.Wrapf(rerr, "request for %q failed (ratelimited)")
+		}
+
+		return nil, errors.Errorf("request for %q failed: %s", ip, string(body))
+	default:
+		// bail with a generic error
+		return nil, errors.Errorf("request for %q failed: unexpected http status: %s", ip, resp.Status)
+	}
+}
+
+func (c client) LookupRaw(ip string) (RawIP, error) {
+	resp, err := c.Request(ip)
+	if err != nil {
+		return RawIP{}, err
+	}
+
+	defer resp.Body.Close()
+
+	rip, err := DecodeRawIP(resp.Body)
+	if err != nil {
+		return RawIP{}, err
+	}
+
+	return rip, nil
+}
+
+func (c client) Lookup(ip string) (IP, error) {
+	resp, err := c.Request(ip)
+	if err != nil {
+		return IP{}, err
+	}
+
+	defer resp.Body.Close()
+
+	pip, err := DecodeIP(resp.Body)
+	if err != nil {
+		return IP{}, err
+	}
+
+	return pip, nil
+}
+
+func newRequest(url, apiKey string) (*http.Request, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+
+	// set the api key header (if set)
+	if len(apiKey) > 0 {
+		req.Header.Set(apiAuthHeader, apiKey)
+	}
+
+	return req, nil
 }
 
 func newHTTPClient() *http.Client {
@@ -74,61 +175,7 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-// Lookup is to satisfy the Client interface.
-func (c client) Lookup(ip string) (IP, error) {
-	// build request
-	req, err := newRequest(c.e+ip, c.k)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "error building request to look up %s", ip)
-	}
-
-	// action request
-	resp, err := c.c.Do(req)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "http request to %q failed", resp.Request.URL.String())
-	}
-
-	// janitorial duties
-	defer resp.Body.Close()
-
-	// response handling by status code
-	// 200:     OK, maybe...
-	// 400,429: possible failure modes
-	// everything else: ¯\_(ツ)_/¯
-	switch resp.StatusCode {
-	case 200:
-		// we can try and parse
-		return DecodeIP(resp.Body)
-	case 400, 429:
-		// provide response body as error to consumer
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
-		}
-
-		if resp.StatusCode == 429 {
-			return IP{}, errors.Errorf("looking up %q failed due to ratelimits: %s", ip, string(body))
-		}
-
-		return IP{}, errors.Errorf("looking up %q failed: %s", ip, string(body))
-	default:
-		// bail with a generic error
-		return IP{}, errors.Errorf("looking up %q failed: unexpected http status: %s", ip, resp.Status)
-	}
-}
-
-func newRequest(url, apiKey string) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("User-Agent", userAgent)
-
-	// set the api key header (if set)
-	if len(apiKey) > 0 {
-		req.Header.Set(apiAuthHeader, apiKey)
-	}
-
-	return req, nil
-}
+// XXX(theckman): compile-time interface check:
+// make sure client implements Client interface
+// if it doesn't, this will fail to compile
+var _ Client = client{}
