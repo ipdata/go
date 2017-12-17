@@ -31,29 +31,9 @@ var userAgent = fmt.Sprintf(
 	Version, fqpn, runtime.Version(), runtime.GOOS, runtime.GOARCH,
 )
 
-// Client is the interface to represent the functionality presented by the
+// Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
-type Client interface {
-	// Request uses the internal mechanics to make an HTTP request to the API
-	// and returns the HTTP response. This allows consumers of the API to
-	// implement their own behaviors.
-	Request(ip string) (*http.Response, error)
-
-	// Lookup takes an IP address to look up the details for. An empty string
-	// means you want the information about the current node's pubilc IP
-	// address.
-	Lookup(ip string) (IP, error)
-
-	// LookupRise takes an IP address to look up the details for. An empty
-	// string means you want the information about the current node's public IP
-	// address.
-	//
-	// This method is a little more performant than Lookup as it does not
-	// convert the RawIP struct to an IP struct.
-	LookupRaw(ip string) (RawIP, error)
-}
-
-type client struct {
+type Client struct {
 	c *http.Client // http client
 	e string       // api endpoint
 	k string       // api key
@@ -62,14 +42,17 @@ type client struct {
 // NewClient takes an optional API key and returns a Client. If you do not have
 // an API key use an empty string ("").
 func NewClient(apiKey string) Client {
-	return client{
+	return Client{
 		c: newHTTPClient(),
 		e: apiEndpoint,
 		k: apiKey,
 	}
 }
 
-func (c client) Request(ip string) (*http.Response, error) {
+// Request uses the internal mechanics to make an HTTP request to the API and
+// returns the HTTP response. This allows consumers of the API to implement
+// their own behaviors.
+func (c Client) Request(ip string) (*http.Response, error) {
 	// build request
 	req, err := newRequest(c.e+ip, c.k)
 	if err != nil {
@@ -109,7 +92,12 @@ func (c client) Request(ip string) (*http.Response, error) {
 	}
 }
 
-func (c client) LookupRaw(ip string) (RawIP, error) {
+// LookupRaw takes an IP address to look up the details for. An empty string
+// means you want the information about the current node's public IP address.
+//
+// This method is a little more performant than Lookup as it does not convert
+// the RawIP struct to an IP struct.
+func (c Client) LookupRaw(ip string) (RawIP, error) {
 	resp, err := c.Request(ip)
 	if err != nil {
 		return RawIP{}, err
@@ -125,7 +113,9 @@ func (c client) LookupRaw(ip string) (RawIP, error) {
 	return rip, nil
 }
 
-func (c client) Lookup(ip string) (IP, error) {
+// Lookup takes an IP address to look up the details for. An empty string means
+// you want the information about the current node's pubilc IP address.
+func (c Client) Lookup(ip string) (IP, error) {
 	resp, err := c.Request(ip)
 	if err != nil {
 		return IP{}, err
@@ -174,8 +164,3 @@ func newHTTPClient() *http.Client {
 		},
 	}
 }
-
-// XXX(theckman): compile-time interface check:
-// make sure client implements Client interface
-// if it doesn't, this will fail to compile
-var _ Client = client{}

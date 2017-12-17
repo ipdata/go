@@ -95,26 +95,19 @@ func TestNewClient(t *testing.T) {
 		{"with_api_key", "testAPIkey", "https://api.ipdata.co/", "testAPIkey"},
 	}
 
-	var c Client
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c = NewClient(tt.i)
+			c := NewClient(tt.i)
 
-			cc, ok := c.(client)
-			if !ok {
-				t.Fatal("expected type assert for c.(client) to succeed")
+			if c.e != tt.e {
+				t.Fatalf("cc.e = %q,want %q", c.e, tt.e)
 			}
 
-			if cc.e != tt.e {
-				t.Fatalf("cc.e = %q,want %q", cc.e, tt.e)
+			if c.k != tt.k {
+				t.Fatalf("cc.k = %q,want %q", c.k, tt.k)
 			}
 
-			if cc.k != tt.k {
-				t.Fatalf("cc.k = %q,want %q", cc.k, tt.k)
-			}
-
-			if cc.c == nil {
+			if c.c == nil {
 				t.Fatal("cc.c should not be nil")
 			}
 		})
@@ -140,7 +133,7 @@ func Test_client_Lookup(t *testing.T) {
 		t.Fatalf("failed to load location: %s", err)
 	}
 
-	c := client{
+	c := Client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
 		k: "testAPIkey",
@@ -297,7 +290,7 @@ func Test_client_LookupRaw(t *testing.T) {
 	defer ln.Close()
 	defer srvr.Close()
 
-	c := client{
+	c := Client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
 		k: "testAPIkey",
@@ -454,14 +447,14 @@ func Test_client_Request(t *testing.T) {
 	defer ln.Close()
 	defer srvr.Close()
 
-	c := client{
+	c := Client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
 		k: "testAPIkey",
 	}
 
 	tests := []struct {
-		c    client
+		c    Client
 		name string
 		i    string
 		o    string
@@ -510,7 +503,7 @@ func Test_client_Request(t *testing.T) {
 			o:    testJSONValid,
 		},
 		{
-			c:    client{c: newHTTPClient(), e: "http://127.0.0.1:8404/", k: "testAPIkey"},
+			c:    Client{c: newHTTPClient(), e: "http://127.0.0.1:8404/", k: "testAPIkey"},
 			name: "tcp_conn_err",
 			i:    "76.14.47.42",
 			e:    `http request to "http://127.0.0.1:8404/76.14.47.42" failed`,
@@ -565,7 +558,7 @@ func Test_client_Lookup_error(t *testing.T) {
 	defer ln.Close()
 	defer srvr.Close()
 
-	c := client{
+	c := Client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
 	}
