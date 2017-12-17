@@ -79,25 +79,25 @@ func (c client) Request(ip string) (*http.Response, error) {
 	// action request
 	resp, err := c.c.Do(req)
 	if err != nil {
-		return nil, errors.Wrapf(err, "http request to %q failed", resp.Request.URL.String())
+		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.String())
 	}
 
 	switch resp.StatusCode {
-	case 200:
+	case http.StatusOK: // 200
 		// we can try and parse
 		return resp, nil
-	case 400, 403, 429:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusTooManyRequests: // 400, 401, 429
 		// provide response body as error to consumer
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
 		}
 
-		if resp.StatusCode == 403 {
+		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, errors.Errorf("request for %q failed (authentication failure): %s", ip, string(body))
 		}
 
-		if resp.StatusCode == 429 {
+		if resp.StatusCode == http.StatusTooManyRequests {
 			rerr := rateErr{r: true, m: string(body)}
 			return nil, errors.Wrapf(rerr, "request for %q failed (ratelimited)")
 		}
