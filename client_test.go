@@ -26,6 +26,11 @@ func testHTTPServer(addr string) (net.Listener, *http.Server, error) {
 
 	// 200 response code
 	mux.HandleFunc("/76.14.47.42", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("api-key") != "testAPIkey" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, "API key does not exist.")
+			return
+		}
 		io.WriteString(w, testJSONValid)
 	})
 
@@ -38,6 +43,17 @@ func testHTTPServer(addr string) (net.Listener, *http.Server, error) {
 	mux.HandleFunc("/bacon", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, "bacon does not appear to be an IPv4 or IPv6 address")
+	})
+
+	// 401 response code
+	mux.HandleFunc("/8.8.4.4", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, "API key does not exist.")
+	})
+
+	mux.HandleFunc("/8.4.0.3", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized) // TODO(theckman) use StatusForbidden soon
+		io.WriteString(w, "unexpected HTTP status code")
 	})
 
 	// 429 response code
@@ -68,6 +84,43 @@ func testHTTPServer(addr string) (net.Listener, *http.Server, error) {
 	return l, server, nil
 }
 
+func TestNewClient(t *testing.T) {
+	tests := []struct {
+		name string
+		i    string
+		e    string
+		k    string
+	}{
+		{"no_api_key", "", "https://api.ipdata.co/", ""},
+		{"with_api_key", "testAPIkey", "https://api.ipdata.co/", "testAPIkey"},
+	}
+
+	var c Client
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c = NewClient(tt.i)
+
+			cc, ok := c.(client)
+			if !ok {
+				t.Fatal("expected type assert for c.(client) to succeed")
+			}
+
+			if cc.e != tt.e {
+				t.Fatalf("cc.e = %q,want %q", cc.e, tt.e)
+			}
+
+			if cc.k != tt.k {
+				t.Fatalf("cc.k = %q,want %q", cc.k, tt.k)
+			}
+
+			if cc.c == nil {
+				t.Fatal("cc.c should not be nil")
+			}
+		})
+	}
+}
+
 func Test_client_Lookup(t *testing.T) {
 	ln, srvr, err := testHTTPServer("")
 	if err != nil {
@@ -90,6 +143,7 @@ func Test_client_Lookup(t *testing.T) {
 	c := client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
+		k: "testAPIkey",
 	}
 
 	tests := []struct {
@@ -246,6 +300,7 @@ func Test_client_LookupRaw(t *testing.T) {
 	c := client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
+		k: "testAPIkey",
 	}
 
 	tests := []struct {
@@ -402,30 +457,60 @@ func Test_client_Request(t *testing.T) {
 	c := client{
 		c: newHTTPClient(),
 		e: "http://" + ln.Addr().String() + "/",
+		k: "testAPIkey",
 	}
 
 	tests := []struct {
+		c    client
 		name string
 		i    string
 		o    string
 		e    string
 	}{
 		{
+			c:    c,
+			name: "invalid_request",
+			i:    "%ƒail",
+			e:    "error building request to look up %ƒail",
+		},
+		{
+			c:    c,
 			name: "private_ipv4",
 			i:    "192.168.0.1",
 			e:    "192.168.0.1 is a private IP address",
 		},
 		{
+			c:    c,
 			name: "invalid_ip",
 			i:    "bacon",
 			e:    "bacon does not appear to be an IPv4 or IPv6 address",
 		},
 		{
+			c:    c,
 			name: "rate_limited",
 			i:    "8.8.8.8",
-			e:    "You have exceeded your free tier limit of 1500 requests. Register for a paid plan at https://ipdata.co to make more requests.",
+			e:    "(ratelimited)",
 		},
 		{
+			c:    c,
+			name: "unexpected_error",
+			i:    "8.4.0.3",
+			e:    "unexpected http status: 401 Unauthorized",
+		},
+		// TODO(theckman): enable these tests
+		// {
+		// 	c:    client{c: newHTTPClient(), e: "http://127.0.0.1:8404/", k: "testAPIkey"},
+		// 	name: "tcp_conn_err",
+		// 	i:    "76.14.47.42",
+		// 	e:    `http request to "http://127.0.0.1:8404/76.14.47.42" failed`,
+		// },
+		// {
+		// 	name: "invalid_api-key",
+		// 	i:    "8.8.4.4",
+		// 	e:    "(authentication failure)",
+		// },
+		{
+			c:    c,
 			name: "valid_address",
 			i:    "76.14.47.42",
 			o:    testJSONValid,
@@ -439,7 +524,7 @@ func Test_client_Request(t *testing.T) {
 			var resp *http.Response
 			var err error
 
-			resp, err = c.Request(tt.i)
+			resp, err = tt.c.Request(tt.i)
 
 			if len(tt.e) > 0 {
 				if err == nil {
