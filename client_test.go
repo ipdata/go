@@ -52,7 +52,7 @@ func testHTTPServer(addr string) (net.Listener, *http.Server, error) {
 	})
 
 	mux.HandleFunc("/8.4.0.3", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized) // TODO(theckman) use StatusForbidden soon
+		w.WriteHeader(http.StatusForbidden)
 		io.WriteString(w, "unexpected HTTP status code")
 	})
 
@@ -495,25 +495,25 @@ func Test_client_Request(t *testing.T) {
 			c:    c,
 			name: "unexpected_error",
 			i:    "8.4.0.3",
-			e:    "unexpected http status: 401 Unauthorized",
+			e:    "unexpected http status: 403 Forbidden",
 		},
-		// TODO(theckman): enable these tests
-		// {
-		// 	c:    client{c: newHTTPClient(), e: "http://127.0.0.1:8404/", k: "testAPIkey"},
-		// 	name: "tcp_conn_err",
-		// 	i:    "76.14.47.42",
-		// 	e:    `http request to "http://127.0.0.1:8404/76.14.47.42" failed`,
-		// },
-		// {
-		// 	name: "invalid_api-key",
-		// 	i:    "8.8.4.4",
-		// 	e:    "(authentication failure)",
-		// },
+		{
+			c:    c,
+			name: "invalid_api-key",
+			i:    "8.8.4.4",
+			e:    "(authentication failure)",
+		},
 		{
 			c:    c,
 			name: "valid_address",
 			i:    "76.14.47.42",
 			o:    testJSONValid,
+		},
+		{
+			c:    client{c: newHTTPClient(), e: "http://127.0.0.1:8404/", k: "testAPIkey"},
+			name: "tcp_conn_err",
+			i:    "76.14.47.42",
+			e:    `http request to "http://127.0.0.1:8404/76.14.47.42" failed`,
 		},
 	}
 
