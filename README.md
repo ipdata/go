@@ -3,7 +3,7 @@
 [![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://godoc.org/github.com/theckman/go-ipdata)
 [![Latest Git Tag](https://img.shields.io/github/tag/theckman/go-ipdata.svg)](https://github.com/theckman/go-ipdata/releases)
 [![Travis master Build Status](https://img.shields.io/travis/theckman/go-ipdata/master.svg?label=TravisCI)](https://travis-ci.org/theckman/go-ipdata/branches)
-[![Go Cover Test Coverage](https://gocover.io/_badge/github.com/theckman/go-ipdata)](https://gocover.io/github.com/theckman/go-ipdata)
+[![Go Cover Test Coverage](https://gocover.io/_badge/github.com/theckman/go-ipdata?v0)](https://gocover.io/github.com/theckman/go-ipdata)
 [![Go Report Card](https://goreportcard.com/badge/github.com/theckman/go-ipdata)](https://goreportcard.com/report/github.com/theckman/go-ipdata)
 
 Package ipdata is a client for the https://ipdata.co API. It provides functions
