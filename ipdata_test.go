@@ -142,7 +142,7 @@ func Test_ripToIP(t *testing.T) {
 			e:    "failed to parse timezone",
 		},
 		{
-			name: "test_valid_RawIP",
+			name: "valid_RawIP",
 			i: RawIP{
 				IP:             "76.14.47.42",
 				ASN:            "AS11404",
@@ -286,12 +286,12 @@ func TestDecodeRawIP(t *testing.T) {
 		e    string
 	}{
 		{
-			name: "test_invalid_json",
+			name: "invalid_json",
 			i:    "garbage",
 			e:    "failed to parse JSON:",
 		},
 		{
-			name: "test_valid_json",
+			name: "valid_json",
 			i:    testJSONValid,
 			o: RawIP{
 				IP:             "76.14.47.42",
@@ -436,7 +436,7 @@ func TestDecodeIP(t *testing.T) {
 			e:    "failed to parse flag",
 		},
 		{
-			name: "test_valid_json",
+			name: "valid_json",
 			i:    testJSONValid,
 			o: IP{
 				IP:             net.ParseIP("76.14.47.42"),
