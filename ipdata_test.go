@@ -129,7 +129,18 @@ func Test_ripToIP(t *testing.T) {
 		name string
 		i    RawIP
 		o    IP
+		e    string
 	}{
+		{
+			name: "invalid_flag",
+			i:    RawIP{Flag: `http://%ƒail`},
+			e:    "failed to parse flag",
+		},
+		{
+			name: "invalid_timezone",
+			i:    RawIP{TimeZone: `http://%ƒail`},
+			e:    "failed to parse timezone",
+		},
 		{
 			name: "test_valid_RawIP",
 			i: RawIP{
@@ -178,6 +189,20 @@ func Test_ripToIP(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			ip, err := ripToIP(tt.i)
+
+			if len(tt.e) > 0 {
+				if err == nil {
+					t.Fatal("error expected but was nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.e) {
+					t.Fatalf("error message %q not found in error: %s", tt.e, err)
+				}
+
+				return
+
+			}
+
 			if err != nil {
 				t.Fatalf("ripToIP(%+v) returned an unexpected error: %s", tt.i, err)
 			}
@@ -258,7 +283,13 @@ func TestDecodeRawIP(t *testing.T) {
 		name string
 		i    string
 		o    RawIP
+		e    string
 	}{
+		{
+			name: "test_invalid_json",
+			i:    "garbage",
+			e:    "failed to parse JSON:",
+		},
 		{
 			name: "test_valid_json",
 			i:    testJSONValid,
@@ -289,6 +320,19 @@ func TestDecodeRawIP(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			ip, err := DecodeRawIP(strings.NewReader(tt.i))
+
+			if len(tt.e) > 0 {
+				if err == nil {
+					t.Fatal("error expected but was nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.e) {
+					t.Fatalf("error message %q not found in error: %s", tt.e, err)
+				}
+
+				return
+			}
+
 			if err != nil {
 				t.Fatalf("DecodeIP(%+v) returned an unexpected error: %s", tt.i, err)
 			}
@@ -379,7 +423,18 @@ func TestDecodeIP(t *testing.T) {
 		name string
 		i    string
 		o    IP
+		e    string
 	}{
+		{
+			name: "invalid_json",
+			i:    "garbage",
+			e:    "failed to parse JSON:",
+		},
+		{
+			name: "invalid_field",
+			i:    `{"flag":"http://%ƒail"}`,
+			e:    "failed to parse flag",
+		},
 		{
 			name: "test_valid_json",
 			i:    testJSONValid,
@@ -410,6 +465,19 @@ func TestDecodeIP(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			ip, err := DecodeIP(strings.NewReader(tt.i))
+
+			if len(tt.e) > 0 {
+				if err == nil {
+					t.Fatal("error expected but was nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.e) {
+					t.Fatalf("error message %q not found in error: %s", tt.e, err)
+				}
+
+				return
+			}
+
 			if err != nil {
 				t.Fatalf("DecodeIP(%+v) returned an unexpected error: %s", tt.i, err)
 			}
