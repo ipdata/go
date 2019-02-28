@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"time"
 
@@ -16,14 +17,14 @@ import (
 )
 
 // Version is the package version
-const Version = "0.4.1"
+const Version = "0.5.0"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
 const fqpn = "github.com/theckman/go-ipdata"
 
 const (
-	apiEndpoint   = "https://api.ipdata.co/"
-	apiAuthHeader = "api-key"
+	apiEndpoint  = "https://api.ipdata.co/"
+	apiAuthParam = "api-key"
 )
 
 var userAgent = fmt.Sprintf(
@@ -62,7 +63,7 @@ func (c Client) Request(ip string) (*http.Response, error) {
 	// action request
 	resp, err := c.c.Do(req)
 	if err != nil {
-		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.String())
+		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
 	}
 
 	switch resp.StatusCode {
@@ -82,7 +83,7 @@ func (c Client) Request(ip string) (*http.Response, error) {
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			rerr := rateErr{r: true, m: string(body)}
-			return nil, errors.Wrapf(rerr, "request for %q failed (ratelimited)")
+			return nil, errors.Wrapf(rerr, "request for %q failed (ratelimited)", req.URL.String())
 		}
 
 		return nil, errors.Errorf("request for %q failed: %s", ip, string(body))
@@ -90,27 +91,6 @@ func (c Client) Request(ip string) (*http.Response, error) {
 		// bail with a generic error
 		return nil, errors.Errorf("request for %q failed: unexpected http status: %s", ip, resp.Status)
 	}
-}
-
-// LookupRaw takes an IP address to look up the details for. An empty string
-// means you want the information about the current node's public IP address.
-//
-// This method is a little more performant than Lookup as it does not convert
-// the RawIP struct to an IP struct.
-func (c Client) LookupRaw(ip string) (RawIP, error) {
-	resp, err := c.Request(ip)
-	if err != nil {
-		return RawIP{}, err
-	}
-
-	defer resp.Body.Close()
-
-	rip, err := DecodeRawIP(resp.Body)
-	if err != nil {
-		return RawIP{}, err
-	}
-
-	return rip, nil
 }
 
 // Lookup takes an IP address to look up the details for. An empty string means
@@ -131,8 +111,8 @@ func (c Client) Lookup(ip string) (IP, error) {
 	return pip, nil
 }
 
-func newRequest(url, apiKey string) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func newRequest(urlStr, apiKey string) (*http.Request, error) {
+	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +121,8 @@ func newRequest(url, apiKey string) (*http.Request, error) {
 
 	// set the api key header (if set)
 	if len(apiKey) > 0 {
-		req.Header.Set(apiAuthHeader, apiKey)
+		q := url.Values{apiAuthParam: []string{apiKey}}
+		req.URL.RawQuery = q.Encode()
 	}
 
 	return req, nil

@@ -5,10 +5,14 @@
 test: vet lint megacheck tests
 
 prebuild:
-	go get -v -u github.com/golang/dep/cmd/dep github.com/golang/lint/golint honnef.co/go/tools/cmd/megacheck
+	go get -v -u github.com/golang/dep/cmd/dep \
+		golang.org/x/lint/golint \
+		honnef.co/go/tools/cmd/megacheck \
+		golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow
 
 vet:
-	go vet -shadow ./...
+	go vet ./...
+	go vet -vettool=$(shell which shadow) ./...
 
 lint:
 	golint -set_exit_status
