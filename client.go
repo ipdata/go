@@ -1,11 +1,13 @@
-// Copyright (c) 2017 Tim Heckman
+// Copyright (c) 2017, 2019 Tim Heckman
 // Use of this source code is governed by the MIT License that can be found in
 // the LICENSE file at the root of this repository.
 
 package ipdata
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -17,7 +19,7 @@ import (
 )
 
 // Version is the package version
-const Version = "0.5.0"
+const Version = "0.6.0"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
 const fqpn = "github.com/theckman/go-ipdata"
@@ -32,6 +34,8 @@ var userAgent = fmt.Sprintf(
 	Version, fqpn, runtime.Version(), runtime.GOOS, runtime.GOARCH,
 )
 
+var errAPIKey = errors.New("apiKey cannot be an empty string")
+
 // Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
 type Client struct {
@@ -42,17 +46,26 @@ type Client struct {
 
 // NewClient takes an optional API key and returns a Client. If you do not have
 // an API key use an empty string ("").
-func NewClient(apiKey string) Client {
+func NewClient(apiKey string) (Client, error) {
+	if len(apiKey) == 0 {
+		return Client{}, errAPIKey
+	}
+
 	return Client{
 		c: newHTTPClient(),
 		e: apiEndpoint,
 		k: apiKey,
-	}
+	}, nil
+}
+
+type apiErr struct {
+	Message string `json:"message"`
 }
 
 // Request uses the internal mechanics to make an HTTP request to the API and
 // returns the HTTP response. This allows consumers of the API to implement
-// their own behaviors.
+// their own behaviors. If an API error occurs, the error value will be of type
+// Error.
 func (c Client) Request(ip string) (*http.Response, error) {
 	// build request
 	req, err := newRequest(c.e+ip, c.k)
@@ -70,40 +83,53 @@ func (c Client) Request(ip string) (*http.Response, error) {
 	case http.StatusOK: // 200
 		// we can try and parse
 		return resp, nil
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusTooManyRequests: // 400, 401, 429
+	default:
 		// provide response body as error to consumer
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized {
-			return nil, errors.Errorf("request for %q failed (authentication failure): %s", ip, string(body))
+		var a apiErr
+
+		if err := json.Unmarshal(body, &a); err != nil {
+			return nil, errors.Errorf("request for %q failed (unexpected response): %s: %v", ip, resp.Status, err)
 		}
 
-		if resp.StatusCode == http.StatusTooManyRequests {
-			rerr := rateErr{r: true, m: string(body)}
-			return nil, errors.Wrapf(rerr, "request for %q failed (ratelimited)", req.URL.String())
-		}
-
-		return nil, errors.Errorf("request for %q failed: %s", ip, string(body))
-	default:
-		// bail with a generic error
-		return nil, errors.Errorf("request for %q failed: unexpected http status: %s", ip, resp.Status)
+		return nil, Error{m: a.Message, c: resp.StatusCode}
 	}
 }
 
+func decodeIP(r io.Reader) (IP, error) {
+	body, err := ioutil.ReadAll(r)
+	if err != nil {
+		return IP{}, err
+	}
+
+	ip := IP{}
+
+	if err := json.Unmarshal(body, &ip); err != nil {
+		return IP{}, fmt.Errorf("failed to parse JSON: %s", err)
+	}
+
+	return ip, nil
+}
+
 // Lookup takes an IP address to look up the details for. An empty string means
-// you want the information about the current node's pubilc IP address.
+// you want the information about the current node's pubilc IP address. If an
+// API error occurs, the error value will be of type Error.
 func (c Client) Lookup(ip string) (IP, error) {
 	resp, err := c.Request(ip)
 	if err != nil {
 		return IP{}, err
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
-	pip, err := DecodeIP(resp.Body)
+	pip, err := decodeIP(resp.Body)
 	if err != nil {
 		return IP{}, err
 	}
@@ -112,6 +138,14 @@ func (c Client) Lookup(ip string) (IP, error) {
 }
 
 func newRequest(urlStr, apiKey string) (*http.Request, error) {
+	if len(urlStr) == 0 {
+		return nil, errors.New("url cannot be an empty string")
+	}
+
+	if len(apiKey) == 0 {
+		return nil, errAPIKey
+	}
+
 	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, err
@@ -119,11 +153,8 @@ func newRequest(urlStr, apiKey string) (*http.Request, error) {
 
 	req.Header.Set("User-Agent", userAgent)
 
-	// set the api key header (if set)
-	if len(apiKey) > 0 {
-		q := url.Values{apiAuthParam: []string{apiKey}}
-		req.URL.RawQuery = q.Encode()
-	}
+	q := url.Values{apiAuthParam: []string{apiKey}}
+	req.URL.RawQuery = q.Encode()
 
 	return req, nil
 }
