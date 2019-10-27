@@ -21,15 +21,16 @@ this repo. The only ask is that a GitHub issue be opened detailing the desired
 functionality before making any pull requests.
 
 ## Usage
-The service provided by `ipdata` can be used anonymously or with an API key. The
-anonymous usage is subject to rate limits. If you are using the anonymous
-service, providing an empty string as an API key is how you inform the API
-client to issue anonymous requests.
+The service provided by `ipdata` requires an API key before making API calls.
+Attempts to create a client without one will fail, as would attempts to contact
+the API. You can get an API key from https://ipdata.co/.
+
+Here is a simple example of using the library:
 
 ```Go
 import "github.com/theckman/go-ipdata"
 
-ipd := ipdata.NewClient("")
+ipd := ipdata.NewClient("EXAMPLE_API_KEY")
 
 data, err := ipd.Lookup("8.8.8.8")
 if err != nil {
@@ -39,11 +40,11 @@ if err != nil {
 fmt.Printf("%s (%s)\n", data.IP, data.ASN)
 ```
 
-You can also use the error returned from the methods to determine whether it was
-a failure due to a rate limit. This package uses the
-[github.com/pkg/errors](https://github.com/pkg/errors) package for error
-handling, which allows you to wrap errors to provide more context. Using this
-functionality is entirely optional.
+Errors returned from the lookup function calls may be of type `Error`, which
+includes the message from the API and the HTTP status code. The `Error()` method
+on this type only returns the message and not the status code. To maintain
+compatibility with Go 1.12.x, this is still using github.com/pkg/errors for
+error management:
 
 ```Go
 import "github.com/pkg/errors"
@@ -51,16 +52,12 @@ import "github.com/pkg/errors"
 data, err := ipd.Lookup("8.8.8.8")
 if err != nil {
 	// do a type assertion on the error
-	rerr, ok := errors.Cause(err).(interface{
-    	RateLimited() bool
-    })
+	rerr, ok := errors.Cause(err).(ipdata.Error)
 
     if !ok {
     	// this wasn't a failure from rate limiting
     }
-
-    if rerr.RateLimited() {
-    	// we were rate limited
-    }
+    
+    fmt.Println("%d: %s", rerr.Code(), rerr.Int())
 }
 ```

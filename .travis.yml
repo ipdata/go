@@ -1,14 +1,13 @@
-# Copyright (c) 2017 Tim Heckman
+# Copyright (c) 2017, 2019 Tim Heckman
 # Use of this source code is governed by the MIT License that can be found in
 # the LICENSE file at the root of this repository.
 
 language: go
 go:
-- tip
-- 1.11.x
 - 1.12.x
+- 1.13.x
 env:
-  - GO111MODULE=auto
+  - GO111MODULE=off
 sudo: false
 notifications:
   email:
