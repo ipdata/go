@@ -62,11 +62,11 @@ type apiErr struct {
 	Message string `json:"message"`
 }
 
-// Request uses the internal mechanics to make an HTTP request to the API and
+// RawLookup uses the internal mechanics to make an HTTP request to the API and
 // returns the HTTP response. This allows consumers of the API to implement
 // their own behaviors. If an API error occurs, the error value will be of type
 // Error.
-func (c Client) Request(ip string) (*http.Response, error) {
+func (c Client) RawLookup(ip string) (*http.Response, error) {
 	// build request
 	req, err := newRequest(c.e+ip, c.k)
 	if err != nil {
@@ -119,7 +119,7 @@ func decodeIP(r io.Reader) (IP, error) {
 // you want the information about the current node's pubilc IP address. If an
 // API error occurs, the error value will be of type Error.
 func (c Client) Lookup(ip string) (IP, error) {
-	resp, err := c.Request(ip)
+	resp, err := c.RawLookup(ip)
 	if err != nil {
 		return IP{}, err
 	}
