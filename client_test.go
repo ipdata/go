@@ -368,7 +368,7 @@ func Test_client_Lookup(t *testing.T) {
 	}
 }
 
-func Test_client_Request(t *testing.T) {
+func Test_client_RawLookup(t *testing.T) {
 	ln, srvr, err := testHTTPServer("")
 	if err != nil {
 		t.Fatalf(`testHTTPServer("") returned unexpected error: %s`, err)
@@ -449,7 +449,7 @@ func Test_client_Request(t *testing.T) {
 			var resp *http.Response
 			var err error
 
-			resp, err = tt.c.Request(tt.i)
+			resp, err = tt.c.RawLookup(tt.i)
 
 			if len(tt.e) > 0 {
 				if err == nil {
@@ -464,7 +464,7 @@ func Test_client_Request(t *testing.T) {
 			}
 
 			if err != nil {
-				t.Fatalf("Request(%q) unexpected error: %s", tt.i, err)
+				t.Fatalf("RawLookup(%q) unexpected error: %s", tt.i, err)
 			}
 
 			defer func() {
