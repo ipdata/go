@@ -19,7 +19,7 @@ import (
 )
 
 // Version is the package version
-const Version = "0.6.0"
+const Version = "0.6.1"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
 const fqpn = "github.com/theckman/go-ipdata"

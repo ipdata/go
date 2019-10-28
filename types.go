@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Tim Heckman
+// Copyright (c) 2017, 2019 Tim Heckman
 // Use of this source code is governed by the MIT License that can be found in
 // the LICENSE file at the root of this repository.
 
@@ -8,7 +8,7 @@ package ipdata
 // API.
 type IP struct {
 	IP           string `json:"ip"`
-	ASN          string `json:"asn"`
+	ASN          ASN    `json:"asn"`
 	Organization string `json:"organisation"`
 
 	City   string `json:"city"`
@@ -43,6 +43,15 @@ type IP struct {
 
 func (ip IP) String() string {
 	return ip.IP
+}
+
+// ASN represents the Autonomous System Number data returned from the API.
+type ASN struct {
+	ASN    string `json:"asn"`
+	Name   string `json:"name"`
+	Domain string `json:"domain"`
+	Route  string `json:"route"`
+	Type   string `json:"type"`
 }
 
 // Language represents the language object within the JSON response from the
