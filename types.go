@@ -110,3 +110,71 @@ type Threat struct {
 	// https://en.wikipedia.org/wiki/Bogon_filtering
 	IsBogon bool `json:"is_bogon"`
 }
+
+type bulkIP struct {
+	IP           string `json:"ip"`
+	ASN          ASN    `json:"asn"`
+	Organization string `json:"organisation"`
+
+	City   string `json:"city"`
+	Region string `json:"region"`
+	Postal string `json:"postal"`
+
+	CountryName string `json:"country_name"`
+	CountryCode string `json:"country_code"`
+
+	Flag         string `json:"flag"`
+	EmojiFlag    string `json:"emoji_flag"`
+	EmojiUnicode string `json:"emoji_unicode"`
+
+	ContinentName string `json:"continent_name"`
+	ContinentCode string `json:"continent_code"`
+
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+
+	CallingCode string `json:"calling_code"`
+
+	IsEU bool `json:"is_eu"`
+
+	Languages []Language `json:"language,omitempty"`
+
+	Currency *Currency `json:"currency,omitempty"`
+
+	TimeZone *TimeZone `json:"time_zone,omitempty"`
+
+	Threat *Threat `json:"threat,omitempty"`
+
+	Message string `json:"message"`
+}
+
+func bulkToIP(bip bulkIP) *IP {
+	ip := IP{
+		IP:            bip.IP,
+		ASN:           bip.ASN,
+		Organization:  bip.Organization,
+		City:          bip.City,
+		Region:        bip.Region,
+		Postal:        bip.Postal,
+		CountryName:   bip.CountryName,
+		CountryCode:   bip.CountryCode,
+		Flag:          bip.Flag,
+		EmojiFlag:     bip.EmojiFlag,
+		EmojiUnicode:  bip.EmojiUnicode,
+		ContinentName: bip.ContinentName,
+		ContinentCode: bip.ContinentCode,
+		Latitude:      bip.Latitude,
+		Longitude:     bip.Longitude,
+		CallingCode:   bip.CallingCode,
+		IsEU:          bip.IsEU,
+		Currency:      bip.Currency,
+		TimeZone:      bip.TimeZone,
+		Threat:        bip.Threat,
+	}
+
+	if len(bip.Languages) > 0 {
+		ip.Languages = bip.Languages
+	}
+
+	return &ip
+}
