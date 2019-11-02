@@ -5,15 +5,19 @@
 package ipdata
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 // testErrCheck looks to see if errContains is a substring of err.Error(). If
@@ -43,6 +47,86 @@ func testErrCheck(t *testing.T, name string, errContains string, err error) bool
 	}
 
 	return true
+}
+
+func testAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to parse form: %v", err)
+			return
+		}
+
+		if r.FormValue("api-key") != "testAPIkey" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprintf(w, `{"message":%q}`, `You have either exceeded your quota or that API key does not exist. Get a free API Key at https://ipdata.co/registration.html or contact support@ipdata.co to upgrade or register for a paid plan at https://ipdata.co/pricing.html.`)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func testBulkHTTPServer() *httptest.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/bulk", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintf(w, "method %s not permitted, want %s", r.Method, http.MethodPost)
+			return
+		}
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to read body: %v", err)
+			return
+		}
+
+		var ips []string
+
+		if err := json.Unmarshal(body, &ips); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "failed to parse JSON body: %v", err)
+			return
+		}
+
+		switch n := len(ips); n {
+		case 2:
+			if ips[0] == "1.1.1.1" {
+				if ips[1] == "8.8.8.8" {
+					fmt.Fprint(w, testBulkJSONValid)
+					return
+				} else if ips[1] == "8.8.4.4" || ips[1] == "4.4.2.2" {
+					if ips[1] == "8.8.4.4" {
+						w.WriteHeader(http.StatusForbidden)
+					}
+					fmt.Fprint(w, "{invalid json")
+					return
+				}
+			}
+
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `ip slice wrong inputs, want ["1.1.1.1","8.8.8.8"] got: %#v`, ips)
+			return
+		case 3:
+			if ips[0] == "1.1.1.1" && ips[1] == "8.8.8.8" && ips[2] == "127.0.0.1" {
+				fmt.Fprint(w, testBulkJSONWithLocalhost)
+				return
+			}
+
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `ip slice wrong inputs, want ["1.1.1.1","8.8.8.8","127.0.0.1"] got: %#v`, ips)
+			return
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "ip slice wrong length, want 2 or 3 got %d: %#v", n, ips)
+			return
+		}
+	}))
+
+	return httptest.NewServer(mux)
 }
 
 func testHTTPServer(addr string) (net.Listener, *http.Server, error) {
@@ -499,7 +583,7 @@ func mustParseURL(u string) *url.URL {
 	return v
 }
 
-func Test_newRequest(t *testing.T) {
+func Test_newGetRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
@@ -522,16 +606,19 @@ func Test_newRequest(t *testing.T) {
 			key:  "abc123",
 			url:  "http://localhost/",
 			want: &http.Request{
-				Header: map[string][]string{"User-Agent": []string{userAgent}},
-				URL:    mustParseURL("http://localhost/?api-key=abc123"),
+				Header: map[string][]string{
+					"User-Agent": []string{userAgent},
+					"Accept":     []string{"application/json"},
+				},
+				URL: mustParseURL("http://localhost/?api-key=abc123"),
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := newRequest(tt.url, tt.key)
-			if cont := testErrCheck(t, "newRequest()", tt.err, err); !cont {
+			got, err := newGetRequest(tt.url, tt.key)
+			if cont := testErrCheck(t, "newGetRequest()", tt.err, err); !cont {
 				return
 			}
 
@@ -541,6 +628,73 @@ func Test_newRequest(t *testing.T) {
 
 			if gots, wants := got.Header.Get("User-Agent"), tt.want.Header.Get("User-Agent"); gots != wants {
 				t.Fatalf("User-Agent = %q, want %q", gots, wants)
+			}
+
+			if gots, wants := got.Header.Get("Accept"), tt.want.Header.Get("Accept"); gots != wants {
+				t.Fatalf("Accept = %q, want %q", gots, wants)
+			}
+		})
+	}
+}
+
+func Test_newBulkPostRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		key  string
+		ips  []string
+
+		want *http.Request
+		err  string
+	}{
+		{
+			name: "no_url",
+			err:  "url cannot be an empty string",
+		},
+		{
+			name: "no_api_key",
+			url:  "http://localhost/",
+			err:  "apiKey cannot be an empty string",
+		},
+		{
+			name: "no_ips",
+			key:  "abc123",
+			url:  "http://localhost/",
+			err:  "must provide at least one IP",
+		},
+		{
+			name: "url",
+			key:  "abc123",
+			url:  "http://localhost/",
+			ips:  []string{"8.8.8.8", "8.8.4.4"},
+			want: &http.Request{
+				Header: map[string][]string{
+					"User-Agent":   []string{userAgent},
+					"Accept":       []string{"application/json"},
+					"Content-Type": []string{"application/json"},
+				},
+				URL: mustParseURL("http://localhost/?api-key=abc123"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newBulkPostRequest(tt.url, tt.key, tt.ips)
+			if cont := testErrCheck(t, "newBulkPostRequest()", tt.err, err); !cont {
+				return
+			}
+
+			if gots, wants := got.URL.String(), tt.want.URL.String(); gots != wants {
+				t.Fatalf("got.URL = %q, want %q", gots, wants)
+			}
+
+			if gots, wants := got.Header.Get("User-Agent"), tt.want.Header.Get("User-Agent"); gots != wants {
+				t.Fatalf("User-Agent = %q, want %q", gots, wants)
+			}
+
+			if gots, wants := got.Header.Get("Content-Type"), tt.want.Header.Get("Content-Type"); gots != wants {
+				t.Fatalf("Content-Type = %q, want %q", gots, wants)
 			}
 		})
 	}
@@ -740,7 +894,396 @@ func Test_decodeIP(t *testing.T) {
 	}
 }
 
-var testJSONValid = `{
+func TestClient_RawBulkLookup(t *testing.T) {
+	server := testBulkHTTPServer()
+
+	defer func() {
+		server.CloseClientConnections()
+		server.Close()
+	}()
+
+	client := &Client{
+		c: newHTTPClient(),
+		e: "http://127.0.0.1:9085/",
+	}
+
+	tests := []struct {
+		name string
+		ips  []string
+
+		setKey    string
+		serverURL string
+
+		wantStatus int
+		wantBody   string
+		err        string
+	}{
+		{
+			name: "no_api_key",
+			err:  "error building bulk lookup request: apiKey cannot be an empty string",
+		},
+		{
+			name:   "no_ips",
+			setKey: "badAPIkey",
+			err:    "error building bulk lookup request: must provide at least one IP",
+		},
+		{
+			name: "bad_host",
+			ips:  []string{"1.1.1.1", "8.8.8.8"},
+			err:  `http request to "http://127.0.0.1:9085/bulk" failed: Post http://127.0.0.1:9085/bulk?api-key=badAPIkey: dial tcp 127.0.0.1:9085: connect: connection refused`,
+		},
+		{
+			name:      "bad_api_key",
+			ips:       []string{"1.1.1.1", "8.8.8.8"},
+			serverURL: server.URL + "/",
+			err:       `You have either exceeded your quota or that API key does not exist. Get a free API Key at https://ipdata.co/registration.html or contact support@ipdata.co to upgrade or register for a paid plan at https://ipdata.co/pricing.html.`,
+		},
+		{
+			name:   "bad_json",
+			ips:    []string{"1.1.1.1", "8.8.4.4"},
+			setKey: "testAPIkey",
+			err:    `request failed (unexpected response): 403 Forbidden: invalid character 'i' looking for beginning of object key string`,
+		},
+		{
+			name:       "good_ips",
+			ips:        []string{"1.1.1.1", "8.8.8.8"},
+			wantStatus: 200,
+			wantBody:   testBulkJSONValid,
+		},
+		{
+			name:       "good_ips_with_localhost",
+			ips:        []string{"1.1.1.1", "8.8.8.8", "127.0.0.1"},
+			wantStatus: 200,
+			wantBody:   testBulkJSONWithLocalhost,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setKey != "" {
+				client.k = tt.setKey
+			}
+
+			if tt.serverURL != "" {
+				client.e = tt.serverURL
+			}
+
+			got, err := client.RawBulkLookup(tt.ips)
+			if cont := testErrCheck(t, "client.RawBulkLookup()", tt.err, err); !cont {
+				return
+			}
+
+			defer func() {
+				_, _ = io.Copy(ioutil.Discard, got.Body)
+				_ = got.Body.Close()
+			}()
+
+			if got.StatusCode != tt.wantStatus {
+				t.Fatalf("got.StatusCode = %d, want %d", got.StatusCode, tt.wantStatus)
+			}
+
+			body, err := ioutil.ReadAll(got.Body)
+			testErrCheck(t, "ioutil.ReadAll()", "", err)
+
+			if b := string(body); b != tt.wantBody {
+				t.Fatalf("got.Body = %q, want %q", b, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestClient_BulkLookup(t *testing.T) {
+	server := testBulkHTTPServer()
+
+	defer func() {
+		server.CloseClientConnections()
+		server.Close()
+	}()
+
+	client := &Client{
+		c: newHTTPClient(),
+		e: "http://127.0.0.1:9085/",
+	}
+
+	tests := []struct {
+		name string
+		ips  []string
+
+		setKey    string
+		serverURL string
+
+		want []*IP
+
+		errStr string
+		err    Error
+	}{
+		{
+			name:   "no_api_key",
+			errStr: "error building bulk lookup request: apiKey cannot be an empty string",
+		},
+		{
+			name:      "bad_api_key",
+			ips:       []string{"1.1.1.1", "8.8.8.8"},
+			serverURL: server.URL + "/",
+			setKey:    "badAPIkey",
+			err: Error{
+				m: `You have either exceeded your quota or that API key does not exist. Get a free API Key at https://ipdata.co/registration.html or contact support@ipdata.co to upgrade or register for a paid plan at https://ipdata.co/pricing.html.`,
+				c: 403,
+				i: -1,
+			},
+		},
+		{
+			name:   "bad_json",
+			ips:    []string{"1.1.1.1", "4.4.2.2"},
+			setKey: "testAPIkey",
+			errStr: `failed to parse JSON: invalid character 'i' looking for beginning of object key string`,
+		},
+		{
+			name: "good_ips",
+			ips:  []string{"1.1.1.1", "8.8.8.8"},
+			want: []*IP{
+				&IP{
+					IP: "1.1.1.1",
+					ASN: ASN{
+						ASN:    "AS13335",
+						Name:   "Cloudflare, Inc.",
+						Domain: "cloudflare.com",
+						Route:  "1.1.1.0/24",
+						Type:   "hosting",
+					},
+					Organization:  "",
+					City:          "",
+					Region:        "",
+					Postal:        "",
+					CountryName:   "Australia",
+					CountryCode:   "AU",
+					Flag:          "https://ipdata.co/flags/au.png",
+					EmojiFlag:     "🇦🇺",
+					EmojiUnicode:  "U+1F1E6 U+1F1FA",
+					ContinentName: "Oceania",
+					ContinentCode: "OC",
+					Latitude:      -33.494,
+					Longitude:     143.2104,
+					CallingCode:   "61",
+					IsEU:          false,
+					Languages:     nil,
+					Currency: &Currency{
+						Name:   "Australian Dollar",
+						Code:   "AUD",
+						Symbol: "AU$",
+						Native: "$",
+						Plural: "Australian dollars",
+					},
+					TimeZone: &TimeZone{
+						Name:         "Australia/Sydney",
+						Abbreviation: "AEDT",
+						Offset:       "+1100",
+						IsDST:        true,
+						CurrentTime:  "2019-11-02T20:27:59.021189+11:00",
+					},
+					Threat: &Threat{
+						IsTOR:           false,
+						IsProxy:         false,
+						IsAnonymous:     false,
+						IsKnownAttacker: false,
+						IsKnownAbuser:   true,
+						IsThreat:        true,
+						IsBogon:         false,
+					},
+				},
+				&IP{
+					IP: "8.8.8.8",
+					ASN: ASN{
+						ASN:    "AS15169",
+						Name:   "Google LLC",
+						Domain: "google.com",
+						Route:  "8.8.8.0/24",
+						Type:   "hosting",
+					},
+					Organization:  "",
+					City:          "",
+					Region:        "",
+					Postal:        "",
+					CountryName:   "United States",
+					CountryCode:   "US",
+					Flag:          "https://ipdata.co/flags/us.png",
+					EmojiFlag:     "🇺🇸",
+					EmojiUnicode:  "U+1F1FA U+1F1F8",
+					ContinentName: "North America",
+					ContinentCode: "NA",
+					Latitude:      37.751,
+					Longitude:     -97.822,
+					CallingCode:   "1",
+					IsEU:          false,
+					Languages:     nil,
+					Currency: &Currency{
+						Name:   "US Dollar",
+						Code:   "USD",
+						Symbol: "$",
+						Native: "$",
+						Plural: "US dollars",
+					},
+					TimeZone: &TimeZone{
+						Name:         "America/Chicago",
+						Abbreviation: "CDT",
+						Offset:       "-0500",
+						IsDST:        true,
+						CurrentTime:  "2019-11-02T04:27:59.022393-05:00",
+					},
+					Threat: &Threat{
+						IsTOR:           false,
+						IsProxy:         false,
+						IsAnonymous:     false,
+						IsKnownAttacker: false,
+						IsKnownAbuser:   false,
+						IsThreat:        false,
+						IsBogon:         false,
+					},
+				},
+			},
+		},
+		{
+			name: "good_ips_with_localhost",
+			ips:  []string{"1.1.1.1", "8.8.8.8", "127.0.0.1"},
+			err: Error{
+				m: `127.0.0.1 is a private IP address`,
+				c: 200,
+				i: 2,
+			},
+			want: []*IP{
+				&IP{
+					IP: "1.1.1.1",
+					ASN: ASN{
+						ASN:    "AS13335",
+						Name:   "Cloudflare, Inc.",
+						Domain: "cloudflare.com",
+						Route:  "1.1.1.0/24",
+						Type:   "hosting",
+					},
+					Organization:  "",
+					City:          "",
+					Region:        "",
+					Postal:        "",
+					CountryName:   "Australia",
+					CountryCode:   "AU",
+					Flag:          "https://ipdata.co/flags/au.png",
+					EmojiFlag:     "🇦🇺",
+					EmojiUnicode:  "U+1F1E6 U+1F1FA",
+					ContinentName: "Oceania",
+					ContinentCode: "OC",
+					Latitude:      -33.494,
+					Longitude:     143.2104,
+					CallingCode:   "61",
+					IsEU:          false,
+					Languages:     nil,
+					Currency: &Currency{
+						Name:   "Australian Dollar",
+						Code:   "AUD",
+						Symbol: "AU$",
+						Native: "$",
+						Plural: "Australian dollars",
+					},
+					TimeZone: &TimeZone{
+						Name:         "Australia/Sydney",
+						Abbreviation: "AEDT",
+						Offset:       "+1100",
+						IsDST:        true,
+						CurrentTime:  "2019-11-02T20:27:59.021189+11:00",
+					},
+					Threat: &Threat{
+						IsTOR:           false,
+						IsProxy:         false,
+						IsAnonymous:     false,
+						IsKnownAttacker: false,
+						IsKnownAbuser:   true,
+						IsThreat:        true,
+						IsBogon:         false,
+					},
+				},
+				&IP{
+					IP: "8.8.8.8",
+					ASN: ASN{
+						ASN:    "AS15169",
+						Name:   "Google LLC",
+						Domain: "google.com",
+						Route:  "8.8.8.0/24",
+						Type:   "hosting",
+					},
+					Organization:  "",
+					City:          "",
+					Region:        "",
+					Postal:        "",
+					CountryName:   "United States",
+					CountryCode:   "US",
+					Flag:          "https://ipdata.co/flags/us.png",
+					EmojiFlag:     "🇺🇸",
+					EmojiUnicode:  "U+1F1FA U+1F1F8",
+					ContinentName: "North America",
+					ContinentCode: "NA",
+					Latitude:      37.751,
+					Longitude:     -97.822,
+					CallingCode:   "1",
+					IsEU:          false,
+					Languages:     nil,
+					Currency: &Currency{
+						Name:   "US Dollar",
+						Code:   "USD",
+						Symbol: "$",
+						Native: "$",
+						Plural: "US dollars",
+					},
+					TimeZone: &TimeZone{
+						Name:         "America/Chicago",
+						Abbreviation: "CDT",
+						Offset:       "-0500",
+						IsDST:        true,
+						CurrentTime:  "2019-11-02T04:27:59.022393-05:00",
+					},
+					Threat: &Threat{
+						IsTOR:           false,
+						IsProxy:         false,
+						IsAnonymous:     false,
+						IsKnownAttacker: false,
+						IsKnownAbuser:   false,
+						IsThreat:        false,
+						IsBogon:         false,
+					},
+				},
+				nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setKey != "" {
+				client.k = tt.setKey
+			}
+
+			if tt.serverURL != "" {
+				client.e = tt.serverURL
+			}
+
+			got, err := client.BulkLookup(tt.ips)
+
+			if iperr, ok := err.(Error); ok {
+				if iperr != tt.err {
+					t.Fatalf("iperr: %#v, want %#v", iperr, tt.err)
+				}
+			} else {
+				if cont := testErrCheck(t, "client.RawBulkLookup()", tt.errStr, err); !cont {
+					return
+				}
+			}
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("IP slice differs: (-want +got)\n%s", diff)
+			}
+		})
+	}
+}
+
+const testJSONValid = `{
 	"ip": "76.14.47.42",
 	"city": "San Francisco",
 	"region": "California",
@@ -793,3 +1336,232 @@ var testJSONValid = `{
 		"is_bogon": false
 	}
 }`
+
+const testBulkJSONValid = `[
+  {
+    "ip": "1.1.1.1",
+    "is_eu": false,
+    "city": null,
+    "region": null,
+    "region_code": null,
+    "country_name": "Australia",
+    "country_code": "AU",
+    "continent_name": "Oceania",
+    "continent_code": "OC",
+    "latitude": -33.494,
+    "longitude": 143.2104,
+    "postal": null,
+    "calling_code": "61",
+    "flag": "https://ipdata.co/flags/au.png",
+    "emoji_flag": "🇦🇺",
+    "emoji_unicode": "U+1F1E6 U+1F1FA",
+    "asn": {
+      "asn": "AS13335",
+      "name": "Cloudflare, Inc.",
+      "domain": "cloudflare.com",
+      "route": "1.1.1.0/24",
+      "type": "hosting"
+    },
+    "languages": [
+      {
+        "name": "English",
+        "native": "English"
+      }
+    ],
+    "currency": {
+      "name": "Australian Dollar",
+      "code": "AUD",
+      "symbol": "AU$",
+      "native": "$",
+      "plural": "Australian dollars"
+    },
+    "time_zone": {
+      "name": "Australia/Sydney",
+      "abbr": "AEDT",
+      "offset": "+1100",
+      "is_dst": true,
+      "current_time": "2019-11-02T20:27:59.021189+11:00"
+    },
+    "threat": {
+      "is_tor": false,
+      "is_proxy": false,
+      "is_anonymous": false,
+      "is_known_attacker": false,
+      "is_known_abuser": true,
+      "is_threat": true,
+      "is_bogon": false
+    },
+    "count": "1551"
+  },
+  {
+    "ip": "8.8.8.8",
+    "is_eu": false,
+    "city": null,
+    "region": null,
+    "region_code": null,
+    "country_name": "United States",
+    "country_code": "US",
+    "continent_name": "North America",
+    "continent_code": "NA",
+    "latitude": 37.751,
+    "longitude": -97.822,
+    "postal": null,
+    "calling_code": "1",
+    "flag": "https://ipdata.co/flags/us.png",
+    "emoji_flag": "🇺🇸",
+    "emoji_unicode": "U+1F1FA U+1F1F8",
+    "asn": {
+      "asn": "AS15169",
+      "name": "Google LLC",
+      "domain": "google.com",
+      "route": "8.8.8.0/24",
+      "type": "hosting"
+    },
+    "languages": [
+      {
+        "name": "English",
+        "native": "English"
+      }
+    ],
+    "currency": {
+      "name": "US Dollar",
+      "code": "USD",
+      "symbol": "$",
+      "native": "$",
+      "plural": "US dollars"
+    },
+    "time_zone": {
+      "name": "America/Chicago",
+      "abbr": "CDT",
+      "offset": "-0500",
+      "is_dst": true,
+      "current_time": "2019-11-02T04:27:59.022393-05:00"
+    },
+    "threat": {
+      "is_tor": false,
+      "is_proxy": false,
+      "is_anonymous": false,
+      "is_known_attacker": false,
+      "is_known_abuser": false,
+      "is_threat": false,
+      "is_bogon": false
+    },
+    "count": "1551"
+  }
+]`
+
+const testBulkJSONWithLocalhost = `[
+  {
+    "ip": "1.1.1.1",
+    "is_eu": false,
+    "city": null,
+    "region": null,
+    "region_code": null,
+    "country_name": "Australia",
+    "country_code": "AU",
+    "continent_name": "Oceania",
+    "continent_code": "OC",
+    "latitude": -33.494,
+    "longitude": 143.2104,
+    "postal": null,
+    "calling_code": "61",
+    "flag": "https://ipdata.co/flags/au.png",
+    "emoji_flag": "🇦🇺",
+    "emoji_unicode": "U+1F1E6 U+1F1FA",
+    "asn": {
+      "asn": "AS13335",
+      "name": "Cloudflare, Inc.",
+      "domain": "cloudflare.com",
+      "route": "1.1.1.0/24",
+      "type": "hosting"
+    },
+    "languages": [
+      {
+        "name": "English",
+        "native": "English"
+      }
+    ],
+    "currency": {
+      "name": "Australian Dollar",
+      "code": "AUD",
+      "symbol": "AU$",
+      "native": "$",
+      "plural": "Australian dollars"
+    },
+    "time_zone": {
+      "name": "Australia/Sydney",
+      "abbr": "AEDT",
+      "offset": "+1100",
+      "is_dst": true,
+      "current_time": "2019-11-02T20:27:59.021189+11:00"
+    },
+    "threat": {
+      "is_tor": false,
+      "is_proxy": false,
+      "is_anonymous": false,
+      "is_known_attacker": false,
+      "is_known_abuser": true,
+      "is_threat": true,
+      "is_bogon": false
+    },
+    "count": "1551"
+  },
+  {
+    "ip": "8.8.8.8",
+    "is_eu": false,
+    "city": null,
+    "region": null,
+    "region_code": null,
+    "country_name": "United States",
+    "country_code": "US",
+    "continent_name": "North America",
+    "continent_code": "NA",
+    "latitude": 37.751,
+    "longitude": -97.822,
+    "postal": null,
+    "calling_code": "1",
+    "flag": "https://ipdata.co/flags/us.png",
+    "emoji_flag": "🇺🇸",
+    "emoji_unicode": "U+1F1FA U+1F1F8",
+    "asn": {
+      "asn": "AS15169",
+      "name": "Google LLC",
+      "domain": "google.com",
+      "route": "8.8.8.0/24",
+      "type": "hosting"
+    },
+    "languages": [
+      {
+        "name": "English",
+        "native": "English"
+      }
+    ],
+    "currency": {
+      "name": "US Dollar",
+      "code": "USD",
+      "symbol": "$",
+      "native": "$",
+      "plural": "US dollars"
+    },
+    "time_zone": {
+      "name": "America/Chicago",
+      "abbr": "CDT",
+      "offset": "-0500",
+      "is_dst": true,
+      "current_time": "2019-11-02T04:27:59.022393-05:00"
+    },
+    "threat": {
+      "is_tor": false,
+      "is_proxy": false,
+      "is_anonymous": false,
+      "is_known_attacker": false,
+      "is_known_abuser": false,
+      "is_threat": false,
+      "is_bogon": false
+    },
+    "count": "1551"
+  },
+  {
+    "message": "127.0.0.1 is a private IP address"
+  }
+]`

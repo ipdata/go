@@ -5,6 +5,7 @@
 package ipdata
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +20,7 @@ import (
 )
 
 // Version is the package version
-const Version = "0.6.1"
+const Version = "0.7.0"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
 const fqpn = "github.com/theckman/go-ipdata"
@@ -68,7 +69,7 @@ type apiErr struct {
 // Error.
 func (c Client) RawLookup(ip string) (*http.Response, error) {
 	// build request
-	req, err := newRequest(c.e+ip, c.k)
+	req, err := newGetRequest(c.e+ip, c.k)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error building request to look up %s", ip)
 	}
@@ -96,7 +97,7 @@ func (c Client) RawLookup(ip string) (*http.Response, error) {
 			return nil, errors.Errorf("request for %q failed (unexpected response): %s: %v", ip, resp.Status, err)
 		}
 
-		return nil, Error{m: a.Message, c: resp.StatusCode}
+		return nil, newError(a.Message, resp.StatusCode)
 	}
 }
 
@@ -137,7 +138,7 @@ func (c Client) Lookup(ip string) (IP, error) {
 	return pip, nil
 }
 
-func newRequest(urlStr, apiKey string) (*http.Request, error) {
+func newGetRequest(urlStr, apiKey string) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
 	}
@@ -152,11 +153,136 @@ func newRequest(urlStr, apiKey string) (*http.Request, error) {
 	}
 
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json")
 
 	q := url.Values{apiAuthParam: []string{apiKey}}
 	req.URL.RawQuery = q.Encode()
 
 	return req, nil
+}
+
+// RawBulkLookup takes a set of IP addresses, and returns the response from the
+// API.
+func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
+	// build request
+	req, err := newBulkPostRequest(c.e+"bulk", c.k, ips)
+	if err != nil {
+		return nil, errors.Wrap(err, "error building bulk lookup request")
+	}
+
+	// action request
+	resp, err := c.c.Do(req)
+	if err != nil {
+		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK: // 200
+		// we can try and parse
+		return resp, nil
+	default:
+		// provide response body as error to consumer
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+		}
+
+		var a apiErr
+
+		if err := json.Unmarshal(body, &a); err != nil {
+			return nil, errors.Errorf("request failed (unexpected response): %s: %v", resp.Status, err)
+		}
+
+		return nil, newError(a.Message, resp.StatusCode)
+	}
+}
+
+func newBulkPostRequest(urlStr, apiKey string, ips []string) (*http.Request, error) {
+	if len(urlStr) == 0 {
+		return nil, errors.New("url cannot be an empty string")
+	}
+
+	if len(apiKey) == 0 {
+		return nil, errAPIKey
+	}
+
+	if len(ips) == 0 {
+		return nil, errors.New("must provide at least one IP")
+	}
+
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(ips); err != nil {
+		return nil, errors.Wrap(err, "failed to encode JSON")
+	}
+
+	req, err := http.NewRequest(http.MethodPost, urlStr, buf)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	q := url.Values{apiAuthParam: []string{apiKey}}
+	req.URL.RawQuery = q.Encode()
+
+	return req, nil
+}
+
+// BulkLookup takes a set of IP addresses, and returns a set of results from the
+// API. If the request failed, or something was wrong with one of the inputs,
+// the error value will be of type Error. If err is non-nil, the []*IP slice may
+// contain data (if it was able to process some of the inputs). The error value
+// will contain the index of the first error in the bulk response.
+//
+// Please note, any IPs that had a failed lookup will be a nil entry in the
+// slice when an error is returned. So if you start to use the []*IP when err !=
+// nil, you will need to add explicit nil checks to avoid pointer derefence
+// panics.
+func (c *Client) BulkLookup(ips []string) ([]*IP, error) {
+	resp, err := c.RawBulkLookup(ips)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read response body")
+	}
+
+	var bip []bulkIP
+
+	if err := json.Unmarshal(body, &bip); err != nil {
+		return nil, errors.Wrap(err, "failed to parse JSON")
+	}
+
+	res := make([]*IP, len(bip))
+	var retErr error
+
+	for i, ip := range bip {
+		if len(ip.Message) > 0 && retErr == nil {
+			retErr = Error{
+				m: ip.Message,
+				c: resp.StatusCode,
+				i: i,
+			}
+			continue
+		}
+
+		res[i] = bulkToIP(ip)
+	}
+
+	if retErr != nil {
+		return res, retErr
+	}
+
+	return res, nil // avoid nil interface check problem
 }
 
 func newHTTPClient() *http.Client {

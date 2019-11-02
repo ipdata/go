@@ -12,6 +12,15 @@ package ipdata
 type Error struct {
 	m string
 	c int
+	i int
+}
+
+func newError(message string, code int) Error {
+	return Error{
+		m: message,
+		c: code,
+		i: -1,
+	}
 }
 
 // Error returns the message JSON field sent from the ipdata.co API. This also
@@ -23,4 +32,9 @@ func (e Error) Error() string {
 // Code returns the HTTP Status code returned from the ipdata.co API.
 func (e Error) Code() int {
 	return e.c
+}
+
+// Index returns the index first item in a BulkLookup that encountered an error.
+func (e Error) Index() int {
+	return e.i
 }
