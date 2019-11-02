@@ -58,6 +58,6 @@ if err != nil {
     	// this wasn't a failure from rate limiting
     }
     
-    fmt.Println("%d: %s", rerr.Code(), rerr.Int())
+    fmt.Println("%d: %s", rerr.Code(), rerr.Error())
 }
 ```
