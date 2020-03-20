@@ -61,3 +61,7 @@ if err != nil {
     fmt.Println("%d: %s", rerr.Code(), rerr.Error())
 }
 ```
+
+## Contributors
+
+- [Tim Heckman](https://github.com/theckman/) - Created the first version of this library
