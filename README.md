@@ -1,4 +1,4 @@
-# go-ipdata
+# ipdata
 [![License](https://img.shields.io/github/license/theckman/go-ipdata.svg)](https://github.com/theckman/go-ipdata/blob/master/LICENSE)
 [![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://godoc.org/github.com/theckman/go-ipdata)
 [![Latest Git Tag](https://img.shields.io/github/tag/theckman/go-ipdata.svg)](https://github.com/theckman/go-ipdata/releases)
