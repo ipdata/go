@@ -13,6 +13,7 @@ type IP struct {
 
 	City   string `json:"city"`
 	Region string `json:"region"`
+	RegionCode string `json:"region_code"`
 	Postal string `json:"postal"`
 
 	CountryName string `json:"country_name"`
