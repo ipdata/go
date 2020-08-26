@@ -6,6 +6,7 @@ package ipdata
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -68,8 +69,13 @@ type apiErr struct {
 // their own behaviors. If an API error occurs, the error value will be of type
 // Error.
 func (c Client) RawLookup(ip string) (*http.Response, error) {
+	return c.RawLookupWithContext(context.Background(), ip)
+}
+
+// RawLookupWithContext is a RawLookup that uses a provided context.Context.
+func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Response, error) {
 	// build request
-	req, err := newGetRequest(c.e+ip, c.k)
+	req, err := newGetRequestWithContext(ctx, c.e+ip, c.k)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error building request to look up %s", ip)
 	}
@@ -120,7 +126,12 @@ func decodeIP(r io.Reader) (IP, error) {
 // you want the information about the current node's pubilc IP address. If an
 // API error occurs, the error value will be of type Error.
 func (c Client) Lookup(ip string) (IP, error) {
-	resp, err := c.RawLookup(ip)
+	return c.LookupWithContext(context.Background(), ip)
+}
+
+// LookupWithContext is a Lookup that uses a provided context.Context.
+func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
+	resp, err := c.RawLookupWithContext(ctx, ip)
 	if err != nil {
 		return IP{}, err
 	}
@@ -139,6 +150,11 @@ func (c Client) Lookup(ip string) (IP, error) {
 }
 
 func newGetRequest(urlStr, apiKey string) (*http.Request, error) {
+	ctx := context.Background()
+	return newGetRequestWithContext(ctx, urlStr, apiKey)
+}
+
+func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
 	}
@@ -147,7 +163,7 @@ func newGetRequest(urlStr, apiKey string) (*http.Request, error) {
 		return nil, errAPIKey
 	}
 
-	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -164,8 +180,13 @@ func newGetRequest(urlStr, apiKey string) (*http.Request, error) {
 // RawBulkLookup takes a set of IP addresses, and returns the response from the
 // API.
 func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
+	return c.RawBulkLookupWithContext(context.Background(), ips)
+}
+
+// RawBulkLookupWithContext is a RawBulkLookup with a provided context.Context.
+	func (c *Client) RawBulkLookupWithContext(ctx context.Context, ips []string) (*http.Response, error) {
 	// build request
-	req, err := newBulkPostRequest(c.e+"bulk", c.k, ips)
+	req, err := newBulkPostRequestWithContext(ctx, c.e+"bulk", c.k, ips)
 	if err != nil {
 		return nil, errors.Wrap(err, "error building bulk lookup request")
 	}
@@ -198,6 +219,10 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 }
 
 func newBulkPostRequest(urlStr, apiKey string, ips []string) (*http.Request, error) {
+	return newBulkPostRequestWithContext(context.Background(), urlStr, apiKey, ips)
+}
+
+func newBulkPostRequestWithContext(ctx context.Context, urlStr, apiKey string, ips []string) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
 	}
@@ -210,12 +235,21 @@ func newBulkPostRequest(urlStr, apiKey string, ips []string) (*http.Request, err
 		return nil, errors.New("must provide at least one IP")
 	}
 
+	if err := ctx.Err(); err != nil {
+		switch err {
+		case context.DeadlineExceeded:
+			return nil, errors.New("context timeout exceeded")
+		case context.Canceled:
+			return nil, errors.New("context cancelled")
+		}
+	}
+
 	buf := &bytes.Buffer{}
 	if err := json.NewEncoder(buf).Encode(ips); err != nil {
 		return nil, errors.Wrap(err, "failed to encode JSON")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, urlStr, buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, buf)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +275,12 @@ func newBulkPostRequest(urlStr, apiKey string, ips []string) (*http.Request, err
 // nil, you will need to add explicit nil checks to avoid pointer derefence
 // panics.
 func (c *Client) BulkLookup(ips []string) ([]*IP, error) {
-	resp, err := c.RawBulkLookup(ips)
+	return c.BulkLookupWithContext(context.Background(), ips)
+}
+
+// BulkLookupWithContext is a BulkLookup with a provided context.Context.
+func (c *Client) BulkLookupWithContext(ctx context.Context, ips []string) ([]*IP, error) {
+	resp, err := c.RawBulkLookupWithContext(ctx, ips)
 	if err != nil {
 		return nil, err
 	}
