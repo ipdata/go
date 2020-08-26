@@ -236,12 +236,7 @@ func newBulkPostRequestWithContext(ctx context.Context, urlStr, apiKey string, i
 	}
 
 	if err := ctx.Err(); err != nil {
-		switch err {
-		case context.DeadlineExceeded:
-			return nil, errors.New("context timeout exceeded")
-		case context.Canceled:
-			return nil, errors.New("context cancelled")
-		}
+		return nil, err
 	}
 
 	buf := &bytes.Buffer{}
