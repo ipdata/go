@@ -5,6 +5,7 @@
 package ipdata
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -583,7 +584,7 @@ func mustParseURL(u string) *url.URL {
 	return v
 }
 
-func Test_newGetRequest(t *testing.T) {
+func Test_newGetRequestWithContext(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
@@ -607,8 +608,8 @@ func Test_newGetRequest(t *testing.T) {
 			url:  "http://localhost/",
 			want: &http.Request{
 				Header: map[string][]string{
-					"User-Agent": []string{userAgent},
-					"Accept":     []string{"application/json"},
+					"User-Agent": {userAgent},
+					"Accept":     {"application/json"},
 				},
 				URL: mustParseURL("http://localhost/?api-key=abc123"),
 			},
@@ -617,8 +618,8 @@ func Test_newGetRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := newGetRequest(tt.url, tt.key)
-			if cont := testErrCheck(t, "newGetRequest()", tt.err, err); !cont {
+			got, err := newGetRequestWithContext(context.Background(), tt.url, tt.key)
+			if cont := testErrCheck(t, "newGetRequestWithContext()", tt.err, err); !cont {
 				return
 			}
 
@@ -637,7 +638,7 @@ func Test_newGetRequest(t *testing.T) {
 	}
 }
 
-func Test_newBulkPostRequest(t *testing.T) {
+func Test_newBulkPostRequestWithContext(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
@@ -669,9 +670,9 @@ func Test_newBulkPostRequest(t *testing.T) {
 			ips:  []string{"8.8.8.8", "8.8.4.4"},
 			want: &http.Request{
 				Header: map[string][]string{
-					"User-Agent":   []string{userAgent},
-					"Accept":       []string{"application/json"},
-					"Content-Type": []string{"application/json"},
+					"User-Agent":   {userAgent},
+					"Accept":       {"application/json"},
+					"Content-Type": {"application/json"},
 				},
 				URL: mustParseURL("http://localhost/?api-key=abc123"),
 			},
@@ -680,8 +681,8 @@ func Test_newBulkPostRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := newBulkPostRequest(tt.url, tt.key, tt.ips)
-			if cont := testErrCheck(t, "newBulkPostRequest()", tt.err, err); !cont {
+			got, err := newBulkPostRequestWithContext(context.Background(), tt.url, tt.key, tt.ips)
+			if cont := testErrCheck(t, "newBulkPostRequestWithContext()", tt.err, err); !cont {
 				return
 			}
 

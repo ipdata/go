@@ -149,11 +149,6 @@ func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
 	return pip, nil
 }
 
-func newGetRequest(urlStr, apiKey string) (*http.Request, error) {
-	ctx := context.Background()
-	return newGetRequestWithContext(ctx, urlStr, apiKey)
-}
-
 func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
@@ -216,10 +211,6 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 
 		return nil, newError(a.Message, resp.StatusCode)
 	}
-}
-
-func newBulkPostRequest(urlStr, apiKey string, ips []string) (*http.Request, error) {
-	return newBulkPostRequestWithContext(context.Background(), urlStr, apiKey, ips)
 }
 
 func newBulkPostRequestWithContext(ctx context.Context, urlStr, apiKey string, ips []string) (*http.Request, error) {
