@@ -28,9 +28,12 @@ the API. You can get an API key from https://ipdata.co/.
 Here is a simple example of using the library:
 
 ```Go
-import "github.com/ipdata/go"
+import (
+    "github.com/ipdata/go"
+    "fmt"
+)
 
-ipd := ipdata.NewClient("EXAMPLE_API_KEY")
+ipd, _ := ipdata.NewClient("EXAMPLE_API_KEY")
 
 data, err := ipd.Lookup("8.8.8.8")
 if err != nil {
