@@ -11,10 +11,10 @@ type IP struct {
 	ASN          ASN    `json:"asn"`
 	Organization string `json:"organisation"`
 
-	City   string `json:"city"`
-	Region string `json:"region"`
+	City       string `json:"city"`
+	Region     string `json:"region"`
 	RegionCode string `json:"region_code"`
-	Postal string `json:"postal"`
+	Postal     string `json:"postal"`
 
 	CountryName string `json:"country_name"`
 	CountryCode string `json:"country_code"`
@@ -37,6 +37,8 @@ type IP struct {
 
 	Currency *Currency `json:"currency,omitempty"`
 
+	Carrier *Carrier `json:"carrier,omitempty"`
+
 	TimeZone *TimeZone `json:"time_zone,omitempty"`
 
 	Threat *Threat `json:"threat,omitempty"`
@@ -53,6 +55,13 @@ type ASN struct {
 	Domain string `json:"domain"`
 	Route  string `json:"route"`
 	Type   string `json:"type"`
+}
+
+// Carrier represents the carrier data returned from the API.
+type Carrier struct {
+	Name string `json:"name"`
+	MCC  string `json:"mcc"`
+	MNC  string `json:"mnc"`
 }
 
 // Language represents the language object within the JSON response from the
