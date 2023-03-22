@@ -119,6 +119,15 @@ type Threat struct {
 	// IsBogon is true if this IP address should be within a bogon filter:
 	// https://en.wikipedia.org/wiki/Bogon_filtering
 	IsBogon bool `json:"is_bogon"`
+
+	Scores Scores `json:"scores"`
+}
+
+type Scores struct {
+	VPNScore    int `json:"vpn_score"`
+	ProxyScore  int `json:"proxy_score"`
+	ThreatScore int `json:"threat_score"`
+	TrustScore  int `json:"trust_score"`
 }
 
 type bulkIP struct {
