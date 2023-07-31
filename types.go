@@ -94,40 +94,32 @@ type TimeZone struct {
 // Threat represents the threat object within the JSON response from the API.
 // This provides information about what type of threat this IP may be.
 type Threat struct {
-	// IsTOR is true if the IP is associated with a node on the TOR (The Onion
-	// Router) network
-	IsTOR bool `json:"is_tor"`
-
-	// IsProxy is true if the IP is associated with bring a proxy
-	// (HTTP/HTTPS/SSL/SOCKS/CONNECT and transparent proxies)
-	IsProxy bool `json:"is_proxy"`
-
-	// IsAnonymous is true if either IsTor or IsProxy are true
-	IsAnonymous bool `json:"is_anonymous"`
-
-	// IsKnownAttacker is true if the IP address is a known source of malicious
-	// activity (i.e. attacks, malware, botnet activity, etc)
-	IsKnownAttacker bool `json:"is_known_attacker"`
-
-	// IsKnownAbuser is true if the IP address is a known source of abuse
-	// (i.e. spam, harvesters, registration bots, and other nuisance bots, etc)
-	IsKnownAbuser bool `json:"is_known_abuser"`
-
-	// IsThreat is true if either IsKnownAttacker or IsKnownAbuser are true
-	IsThreat bool `json:"is_threat"`
-
-	// IsBogon is true if this IP address should be within a bogon filter:
-	// https://en.wikipedia.org/wiki/Bogon_filtering
-	IsBogon bool `json:"is_bogon"`
-
-	Scores Scores `json:"scores"`
+    IsTOR            bool        `json:"is_tor"`
+    IsVPN            bool        `json:"is_vpn"`
+    IsICloudRelay    bool        `json:"is_icloud_relay"`
+    IsProxy          bool        `json:"is_proxy"`
+    IsDatacenter     bool        `json:"is_datacenter"`
+    IsAnonymous      bool        `json:"is_anonymous"`
+    IsKnownAttacker  bool        `json:"is_known_attacker"`
+    IsKnownAbuser    bool        `json:"is_known_abuser"`
+    IsThreat         bool        `json:"is_threat"`
+    IsBogon          bool        `json:"is_bogon"`
+    Blocklists       []Blocklist `json:"blocklists"`
+    Scores           Scores      `json:"scores"`
 }
 
+type Blocklist struct {
+    Name string `json:"name"`
+    Site string `json:"site"`
+    Type string `json:"type"`
+}
+
+
 type Scores struct {
-	VPNScore    int `json:"vpn_score"`
-	ProxyScore  int `json:"proxy_score"`
-	ThreatScore int `json:"threat_score"`
-	TrustScore  int `json:"trust_score"`
+    VPNScore    int `json:"vpn_score"`
+    ProxyScore  int `json:"proxy_score"`
+    ThreatScore int `json:"threat_score"`
+    TrustScore  int `json:"trust_score"`
 }
 
 type bulkIP struct {
