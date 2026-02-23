@@ -27,8 +27,9 @@ const Version = "0.8.0"
 const fqpn = "github.com/theckman/go-ipdata"
 
 const (
-	apiEndpoint  = "https://api.ipdata.co/"
-	apiAuthParam = "api-key"
+	apiEndpoint   = "https://api.ipdata.co/"
+	euAPIEndpoint = "https://eu-api.ipdata.co/"
+	apiAuthParam  = "api-key"
 )
 
 var userAgent = fmt.Sprintf(
@@ -46,8 +47,8 @@ type Client struct {
 	k string       // api key
 }
 
-// NewClient takes an optional API key and returns a Client. If you do not have
-// an API key use an empty string ("").
+// NewClient takes an API key and returns a Client that uses the default
+// endpoint (https://api.ipdata.co/).
 func NewClient(apiKey string) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
@@ -56,6 +57,22 @@ func NewClient(apiKey string) (Client, error) {
 	return Client{
 		c: newHTTPClient(),
 		e: apiEndpoint,
+		k: apiKey,
+	}, nil
+}
+
+// NewEUClient takes an API key and returns a Client that uses the EU endpoint
+// (https://eu-api.ipdata.co/). This ensures that all requests are routed
+// through EU data centers only (Frankfurt, Paris, Ireland), which can be
+// useful for GDPR compliance.
+func NewEUClient(apiKey string) (Client, error) {
+	if len(apiKey) == 0 {
+		return Client{}, errAPIKey
+	}
+
+	return Client{
+		c: newHTTPClient(),
+		e: euAPIEndpoint,
 		k: apiKey,
 	}, nil
 }

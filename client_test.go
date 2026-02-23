@@ -260,6 +260,50 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
+func TestNewEUClient(t *testing.T) {
+	tests := []struct {
+		name string
+		i    string
+		e    string
+		k    string
+		err  string
+	}{
+		{
+			name: "no_api_key",
+			e:    "https://eu-api.ipdata.co/",
+			err:  "apiKey cannot be an empty string",
+		},
+		{
+			name: "with_api_key",
+			i:    "testAPIkey",
+			e:    "https://eu-api.ipdata.co/",
+			k:    "testAPIkey",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := NewEUClient(tt.i)
+
+			if cont := testErrCheck(t, "NewEUClient()", tt.err, err); !cont {
+				return
+			}
+
+			if c.e != tt.e {
+				t.Fatalf("c.e = %q, want %q", c.e, tt.e)
+			}
+
+			if c.k != tt.k {
+				t.Fatalf("c.k = %q, want %q", c.k, tt.k)
+			}
+
+			if c.c == nil {
+				t.Fatal("c.c should not be nil")
+			}
+		})
+	}
+}
+
 const tjFlagURL = "https://ipdata.co/flags/us.png"
 
 func Test_client_Lookup(t *testing.T) {
