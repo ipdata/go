@@ -10,25 +10,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 )
 
 // Version is the package version
-const Version = "0.7.1"
+const Version = "0.8.0"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
 const fqpn = "github.com/theckman/go-ipdata"
 
 const (
-	apiEndpoint  = "https://api.ipdata.co/"
-	apiAuthParam = "api-key"
+	apiEndpoint   = "https://api.ipdata.co/"
+	euAPIEndpoint = "https://eu-api.ipdata.co/"
+	apiAuthParam  = "api-key"
 )
 
 var userAgent = fmt.Sprintf(
@@ -46,8 +47,8 @@ type Client struct {
 	k string       // api key
 }
 
-// NewClient takes an optional API key and returns a Client. If you do not have
-// an API key use an empty string ("").
+// NewClient takes an API key and returns a Client that uses the default
+// endpoint (https://api.ipdata.co/).
 func NewClient(apiKey string) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
@@ -56,6 +57,22 @@ func NewClient(apiKey string) (Client, error) {
 	return Client{
 		c: newHTTPClient(),
 		e: apiEndpoint,
+		k: apiKey,
+	}, nil
+}
+
+// NewEUClient takes an API key and returns a Client that uses the EU endpoint
+// (https://eu-api.ipdata.co/). This ensures that all requests are routed
+// through EU data centers only (Frankfurt, Paris, Ireland), which can be
+// useful for GDPR compliance.
+func NewEUClient(apiKey string) (Client, error) {
+	if len(apiKey) == 0 {
+		return Client{}, errAPIKey
+	}
+
+	return Client{
+		c: newHTTPClient(),
+		e: euAPIEndpoint,
 		k: apiKey,
 	}, nil
 }
@@ -92,7 +109,7 @@ func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Resp
 		return resp, nil
 	default:
 		// provide response body as error to consumer
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
 		}
@@ -108,7 +125,7 @@ func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Resp
 }
 
 func decodeIP(r io.Reader) (IP, error) {
-	body, err := ioutil.ReadAll(r)
+	body, err := io.ReadAll(r)
 	if err != nil {
 		return IP{}, err
 	}
@@ -137,7 +154,7 @@ func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
 	}
 
 	defer func() {
-		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
 
@@ -147,6 +164,56 @@ func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
 	}
 
 	return pip, nil
+}
+
+// LookupFields takes an IP address and a list of fields to return. Only the
+// specified fields will be populated in the response. If an API error occurs,
+// the error value will be of type Error.
+func (c Client) LookupFields(ip string, fields []string) (IP, error) {
+	return c.LookupFieldsWithContext(context.Background(), ip, fields)
+}
+
+// LookupFieldsWithContext is a LookupFields that uses a provided context.Context.
+func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields []string) (IP, error) {
+	reqURL := c.e + ip
+	if len(fields) > 0 {
+		reqURL += "?fields=" + strings.Join(fields, ",")
+	}
+
+	req, err := newGetRequestWithContext(ctx, reqURL, c.k)
+	if err != nil {
+		return IP{}, errors.Wrapf(err, "error building request to look up %s", ip)
+	}
+
+	resp, err := c.c.Do(req)
+	if err != nil {
+		return IP{}, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		pip, err := decodeIP(resp.Body)
+		if err != nil {
+			return IP{}, err
+		}
+		return pip, nil
+	default:
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+		}
+
+		var a apiErr
+		if err := json.Unmarshal(body, &a); err != nil {
+			return IP{}, errors.Errorf("request for %q failed (unexpected response): %s: %v", ip, resp.Status, err)
+		}
+		return IP{}, newError(a.Message, resp.StatusCode)
+	}
 }
 
 func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http.Request, error) {
@@ -198,7 +265,7 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 		return resp, nil
 	default:
 		// provide response body as error to consumer
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
 		}
@@ -272,11 +339,11 @@ func (c *Client) BulkLookupWithContext(ctx context.Context, ips []string) ([]*IP
 	}
 
 	defer func() {
-		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read response body")
 	}
@@ -317,7 +384,6 @@ func newHTTPClient() *http.Client {
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
-				DualStack: true,
 			}).DialContext,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       60 * time.Second,

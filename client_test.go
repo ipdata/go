@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -78,7 +77,7 @@ func testBulkHTTPServer() *httptest.Server {
 			return
 		}
 
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(w, "failed to read body: %v", err)
@@ -261,6 +260,50 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
+func TestNewEUClient(t *testing.T) {
+	tests := []struct {
+		name string
+		i    string
+		e    string
+		k    string
+		err  string
+	}{
+		{
+			name: "no_api_key",
+			e:    "https://eu-api.ipdata.co/",
+			err:  "apiKey cannot be an empty string",
+		},
+		{
+			name: "with_api_key",
+			i:    "testAPIkey",
+			e:    "https://eu-api.ipdata.co/",
+			k:    "testAPIkey",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := NewEUClient(tt.i)
+
+			if cont := testErrCheck(t, "NewEUClient()", tt.err, err); !cont {
+				return
+			}
+
+			if c.e != tt.e {
+				t.Fatalf("c.e = %q, want %q", c.e, tt.e)
+			}
+
+			if c.k != tt.k {
+				t.Fatalf("c.k = %q, want %q", c.k, tt.k)
+			}
+
+			if c.c == nil {
+				t.Fatal("c.c should not be nil")
+			}
+		})
+	}
+}
+
 const tjFlagURL = "https://ipdata.co/flags/us.png"
 
 func Test_client_Lookup(t *testing.T) {
@@ -325,23 +368,37 @@ func Test_client_Lookup(t *testing.T) {
 				Organization:  "vanoppen.biz LLC",
 				City:          "San Francisco",
 				Region:        "California",
+				RegionCode:    "CA",
 				Postal:        "94132",
 				CountryName:   "United States",
 				CountryCode:   "US",
 				Flag:          tjFlagURL,
-				EmojiUnicode:  `"U+1F1FA U+1F1F8"`,
+				EmojiFlag:     "\U0001F1FA\U0001F1F8",
+				EmojiUnicode:  `U+1F1FA U+1F1F8`,
 				ContinentName: "North America",
 				ContinentCode: "NA",
 				Latitude:      37.723,
 				Longitude:     -122.4842,
 				CallingCode:   "1",
-				Languages:     []Language{},
+				IsEU:          true,
+				Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 				Currency: &Currency{
 					Name:   "US Dollar",
 					Code:   "USD",
 					Symbol: "$",
 					Native: "$",
 					Plural: "US dollars",
+				},
+				Company: &Company{
+					Name:    "vanoppen.biz LLC",
+					Domain:  "wavebroadband.com",
+					Network: "76.14.0.0/17",
+					Type:    "isp",
+				},
+				Carrier: &Carrier{
+					Name: "T-Mobile",
+					MCC:  "310",
+					MNC:  "260",
 				},
 				TimeZone: &TimeZone{
 					Name:         "America/Los_Angeles",
@@ -358,7 +415,16 @@ func Test_client_Lookup(t *testing.T) {
 					IsKnownAbuser:   false,
 					IsThreat:        true,
 					IsBogon:         false,
+					Blocklists:      []Blocklist{},
+					Scores: Scores{
+						VPNScore:    0,
+						ProxyScore:  0,
+						ThreatScore: 1,
+						TrustScore:  99,
+					},
 				},
+				Count:  "1234",
+				Status: 200,
 			},
 		},
 	}
@@ -452,11 +518,92 @@ func Test_client_Lookup(t *testing.T) {
 				t.Errorf("ip.TimeZone = %#v, want %#v", a, b)
 			}
 
-			if a, b := *ip.Threat, *tt.o.Threat; a != b {
-				t.Errorf("ip.Threat = %#v, want %#v", a, b)
+			if diff := cmp.Diff(tt.o.Threat, ip.Threat); diff != "" {
+				t.Errorf("ip.Threat differs: (-want +got)\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tt.o.Company, ip.Company); diff != "" {
+				t.Errorf("ip.Company differs: (-want +got)\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tt.o.Carrier, ip.Carrier); diff != "" {
+				t.Errorf("ip.Carrier differs: (-want +got)\n%s", diff)
+			}
+
+			if ip.Count != tt.o.Count {
+				t.Errorf("ip.Count = %q, want %q", ip.Count, tt.o.Count)
+			}
+
+			if ip.Status != tt.o.Status {
+				t.Errorf("ip.Status = %d, want %d", ip.Status, tt.o.Status)
 			}
 		})
 	}
+}
+
+func Test_client_LookupFields(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/76.14.47.42", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if r.FormValue("api-key") != "testAPIkey" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, "API key does not exist.")
+			return
+		}
+
+		fields := r.FormValue("fields")
+		if fields == "" {
+			_, _ = io.WriteString(w, testJSONValid)
+			return
+		}
+
+		// Return a partial response when fields are specified
+		_, _ = io.WriteString(w, `{"ip": "76.14.47.42", "country_name": "United States"}`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := Client{
+		c: newHTTPClient(),
+		e: server.URL + "/",
+		k: "testAPIkey",
+	}
+
+	t.Run("with_fields", func(t *testing.T) {
+		ip, err := c.LookupFields("76.14.47.42", []string{"ip", "country_name"})
+		if err != nil {
+			t.Fatalf("LookupFields() unexpected error: %v", err)
+		}
+
+		if ip.IP != "76.14.47.42" {
+			t.Errorf("ip.IP = %q, want %q", ip.IP, "76.14.47.42")
+		}
+
+		if ip.CountryName != "United States" {
+			t.Errorf("ip.CountryName = %q, want %q", ip.CountryName, "United States")
+		}
+	})
+
+	t.Run("no_fields", func(t *testing.T) {
+		ip, err := c.LookupFields("76.14.47.42", nil)
+		if err != nil {
+			t.Fatalf("LookupFields() unexpected error: %v", err)
+		}
+
+		if ip.IP != "76.14.47.42" {
+			t.Errorf("ip.IP = %q, want %q", ip.IP, "76.14.47.42")
+		}
+
+		if ip.CountryName != "United States" {
+			t.Errorf("ip.CountryName = %q, want %q", ip.CountryName, "United States")
+		}
+	})
 }
 
 func Test_client_RawLookup(t *testing.T) {
@@ -559,11 +706,11 @@ func Test_client_RawLookup(t *testing.T) {
 			}
 
 			defer func() {
-				_, _ = io.Copy(ioutil.Discard, resp.Body)
+				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
 			}()
 
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				t.Fatalf("unexpected error reading response body: %s", err)
 			}
@@ -728,10 +875,12 @@ func Test_decodeIP(t *testing.T) {
 				Organization:  "vanoppen.biz LLC",
 				City:          "San Francisco",
 				Region:        "California",
+				RegionCode:    "CA",
 				Postal:        "94132",
 				CountryName:   "United States",
 				CountryCode:   "US",
 				Flag:          tjFlagURL,
+				EmojiFlag:     "\U0001F1FA\U0001F1F8",
 				EmojiUnicode:  `U+1F1FA U+1F1F8`,
 				ContinentName: "North America",
 				ContinentCode: "NA",
@@ -739,13 +888,24 @@ func Test_decodeIP(t *testing.T) {
 				Longitude:     -122.4842,
 				CallingCode:   "1",
 				IsEU:          true,
-				Languages:     []Language{},
+				Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 				Currency: &Currency{
 					Name:   "US Dollar",
 					Code:   "USD",
 					Symbol: "$",
 					Native: "$",
 					Plural: "US dollars",
+				},
+				Company: &Company{
+					Name:    "vanoppen.biz LLC",
+					Domain:  "wavebroadband.com",
+					Network: "76.14.0.0/17",
+					Type:    "isp",
+				},
+				Carrier: &Carrier{
+					Name: "T-Mobile",
+					MCC:  "310",
+					MNC:  "260",
 				},
 				TimeZone: &TimeZone{
 					Name:         "America/Los_Angeles",
@@ -762,7 +922,16 @@ func Test_decodeIP(t *testing.T) {
 					IsKnownAbuser:   false,
 					IsThreat:        true,
 					IsBogon:         false,
+					Blocklists:      []Blocklist{},
+					Scores: Scores{
+						VPNScore:    0,
+						ProxyScore:  0,
+						ThreatScore: 1,
+						TrustScore:  99,
+					},
 				},
+				Count:  "1234",
+				Status: 200,
 			},
 		},
 	}
@@ -888,8 +1057,24 @@ func Test_decodeIP(t *testing.T) {
 				t.Errorf("ip.TimeZone = %#v, want %#v", a, b)
 			}
 
-			if a, b := *ip.Threat, *tt.o.Threat; a != b {
-				t.Errorf("ip.Threat = %#v, want %#v", a, b)
+			if diff := cmp.Diff(tt.o.Threat, ip.Threat); diff != "" {
+				t.Errorf("ip.Threat differs: (-want +got)\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tt.o.Company, ip.Company); diff != "" {
+				t.Errorf("ip.Company differs: (-want +got)\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tt.o.Carrier, ip.Carrier); diff != "" {
+				t.Errorf("ip.Carrier differs: (-want +got)\n%s", diff)
+			}
+
+			if ip.Count != tt.o.Count {
+				t.Errorf("ip.Count = %q, want %q", ip.Count, tt.o.Count)
+			}
+
+			if ip.Status != tt.o.Status {
+				t.Errorf("ip.Status = %d, want %d", ip.Status, tt.o.Status)
 			}
 		})
 	}
@@ -931,7 +1116,7 @@ func TestClient_RawBulkLookup(t *testing.T) {
 		{
 			name: "bad_host",
 			ips:  []string{"1.1.1.1", "8.8.8.8"},
-			err:  `http request to "http://127.0.0.1:9085/bulk" failed: Post http://127.0.0.1:9085/bulk?api-key=badAPIkey: dial tcp 127.0.0.1:9085: connect: connection refused`,
+			err:  `http request to "http://127.0.0.1:9085/bulk" failed:`,
 		},
 		{
 			name:      "bad_api_key",
@@ -975,7 +1160,7 @@ func TestClient_RawBulkLookup(t *testing.T) {
 			}
 
 			defer func() {
-				_, _ = io.Copy(ioutil.Discard, got.Body)
+				_, _ = io.Copy(io.Discard, got.Body)
 				_ = got.Body.Close()
 			}()
 
@@ -983,8 +1168,8 @@ func TestClient_RawBulkLookup(t *testing.T) {
 				t.Fatalf("got.StatusCode = %d, want %d", got.StatusCode, tt.wantStatus)
 			}
 
-			body, err := ioutil.ReadAll(got.Body)
-			testErrCheck(t, "ioutil.ReadAll()", "", err)
+			body, err := io.ReadAll(got.Body)
+			testErrCheck(t, "io.ReadAll()", "", err)
 
 			if b := string(body); b != tt.wantBody {
 				t.Fatalf("got.Body = %q, want %q", b, tt.wantBody)
@@ -1043,7 +1228,7 @@ func TestClient_BulkLookup(t *testing.T) {
 			name: "good_ips",
 			ips:  []string{"1.1.1.1", "8.8.8.8"},
 			want: []*IP{
-				&IP{
+				{
 					IP: "1.1.1.1",
 					ASN: ASN{
 						ASN:    "AS13335",
@@ -1052,14 +1237,10 @@ func TestClient_BulkLookup(t *testing.T) {
 						Route:  "1.1.1.0/24",
 						Type:   "hosting",
 					},
-					Organization:  "",
-					City:          "",
-					Region:        "",
-					Postal:        "",
 					CountryName:   "Australia",
 					CountryCode:   "AU",
 					Flag:          "https://ipdata.co/flags/au.png",
-					EmojiFlag:     "🇦🇺",
+					EmojiFlag:     "\U0001F1E6\U0001F1FA",
 					EmojiUnicode:  "U+1F1E6 U+1F1FA",
 					ContinentName: "Oceania",
 					ContinentCode: "OC",
@@ -1067,13 +1248,19 @@ func TestClient_BulkLookup(t *testing.T) {
 					Longitude:     143.2104,
 					CallingCode:   "61",
 					IsEU:          false,
-					Languages:     nil,
+					Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 					Currency: &Currency{
 						Name:   "Australian Dollar",
 						Code:   "AUD",
 						Symbol: "AU$",
 						Native: "$",
 						Plural: "Australian dollars",
+					},
+					Company: &Company{
+						Name:    "Cloudflare, Inc.",
+						Domain:  "cloudflare.com",
+						Network: "1.1.1.0/24",
+						Type:    "hosting",
 					},
 					TimeZone: &TimeZone{
 						Name:         "Australia/Sydney",
@@ -1090,9 +1277,17 @@ func TestClient_BulkLookup(t *testing.T) {
 						IsKnownAbuser:   true,
 						IsThreat:        true,
 						IsBogon:         false,
+						Blocklists:      []Blocklist{},
+						Scores: Scores{
+							VPNScore:    0,
+							ProxyScore:  0,
+							ThreatScore: 5,
+							TrustScore:  70,
+						},
 					},
+					Count: "1551",
 				},
-				&IP{
+				{
 					IP: "8.8.8.8",
 					ASN: ASN{
 						ASN:    "AS15169",
@@ -1101,14 +1296,10 @@ func TestClient_BulkLookup(t *testing.T) {
 						Route:  "8.8.8.0/24",
 						Type:   "hosting",
 					},
-					Organization:  "",
-					City:          "",
-					Region:        "",
-					Postal:        "",
 					CountryName:   "United States",
 					CountryCode:   "US",
 					Flag:          "https://ipdata.co/flags/us.png",
-					EmojiFlag:     "🇺🇸",
+					EmojiFlag:     "\U0001F1FA\U0001F1F8",
 					EmojiUnicode:  "U+1F1FA U+1F1F8",
 					ContinentName: "North America",
 					ContinentCode: "NA",
@@ -1116,13 +1307,19 @@ func TestClient_BulkLookup(t *testing.T) {
 					Longitude:     -97.822,
 					CallingCode:   "1",
 					IsEU:          false,
-					Languages:     nil,
+					Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 					Currency: &Currency{
 						Name:   "US Dollar",
 						Code:   "USD",
 						Symbol: "$",
 						Native: "$",
 						Plural: "US dollars",
+					},
+					Company: &Company{
+						Name:    "Google LLC",
+						Domain:  "google.com",
+						Network: "8.8.8.0/24",
+						Type:    "business",
 					},
 					TimeZone: &TimeZone{
 						Name:         "America/Chicago",
@@ -1139,7 +1336,12 @@ func TestClient_BulkLookup(t *testing.T) {
 						IsKnownAbuser:   false,
 						IsThreat:        false,
 						IsBogon:         false,
+						Blocklists:      []Blocklist{},
+						Scores: Scores{
+							TrustScore: 100,
+						},
 					},
+					Count: "1551",
 				},
 			},
 		},
@@ -1152,7 +1354,7 @@ func TestClient_BulkLookup(t *testing.T) {
 				i: 2,
 			},
 			want: []*IP{
-				&IP{
+				{
 					IP: "1.1.1.1",
 					ASN: ASN{
 						ASN:    "AS13335",
@@ -1161,14 +1363,10 @@ func TestClient_BulkLookup(t *testing.T) {
 						Route:  "1.1.1.0/24",
 						Type:   "hosting",
 					},
-					Organization:  "",
-					City:          "",
-					Region:        "",
-					Postal:        "",
 					CountryName:   "Australia",
 					CountryCode:   "AU",
 					Flag:          "https://ipdata.co/flags/au.png",
-					EmojiFlag:     "🇦🇺",
+					EmojiFlag:     "\U0001F1E6\U0001F1FA",
 					EmojiUnicode:  "U+1F1E6 U+1F1FA",
 					ContinentName: "Oceania",
 					ContinentCode: "OC",
@@ -1176,13 +1374,19 @@ func TestClient_BulkLookup(t *testing.T) {
 					Longitude:     143.2104,
 					CallingCode:   "61",
 					IsEU:          false,
-					Languages:     nil,
+					Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 					Currency: &Currency{
 						Name:   "Australian Dollar",
 						Code:   "AUD",
 						Symbol: "AU$",
 						Native: "$",
 						Plural: "Australian dollars",
+					},
+					Company: &Company{
+						Name:    "Cloudflare, Inc.",
+						Domain:  "cloudflare.com",
+						Network: "1.1.1.0/24",
+						Type:    "hosting",
 					},
 					TimeZone: &TimeZone{
 						Name:         "Australia/Sydney",
@@ -1199,9 +1403,17 @@ func TestClient_BulkLookup(t *testing.T) {
 						IsKnownAbuser:   true,
 						IsThreat:        true,
 						IsBogon:         false,
+						Blocklists:      []Blocklist{},
+						Scores: Scores{
+							VPNScore:    0,
+							ProxyScore:  0,
+							ThreatScore: 5,
+							TrustScore:  70,
+						},
 					},
+					Count: "1551",
 				},
-				&IP{
+				{
 					IP: "8.8.8.8",
 					ASN: ASN{
 						ASN:    "AS15169",
@@ -1210,14 +1422,10 @@ func TestClient_BulkLookup(t *testing.T) {
 						Route:  "8.8.8.0/24",
 						Type:   "hosting",
 					},
-					Organization:  "",
-					City:          "",
-					Region:        "",
-					Postal:        "",
 					CountryName:   "United States",
 					CountryCode:   "US",
 					Flag:          "https://ipdata.co/flags/us.png",
-					EmojiFlag:     "🇺🇸",
+					EmojiFlag:     "\U0001F1FA\U0001F1F8",
 					EmojiUnicode:  "U+1F1FA U+1F1F8",
 					ContinentName: "North America",
 					ContinentCode: "NA",
@@ -1225,13 +1433,19 @@ func TestClient_BulkLookup(t *testing.T) {
 					Longitude:     -97.822,
 					CallingCode:   "1",
 					IsEU:          false,
-					Languages:     nil,
+					Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
 					Currency: &Currency{
 						Name:   "US Dollar",
 						Code:   "USD",
 						Symbol: "$",
 						Native: "$",
 						Plural: "US dollars",
+					},
+					Company: &Company{
+						Name:    "Google LLC",
+						Domain:  "google.com",
+						Network: "8.8.8.0/24",
+						Type:    "business",
 					},
 					TimeZone: &TimeZone{
 						Name:         "America/Chicago",
@@ -1248,7 +1462,12 @@ func TestClient_BulkLookup(t *testing.T) {
 						IsKnownAbuser:   false,
 						IsThreat:        false,
 						IsBogon:         false,
+						Blocklists:      []Blocklist{},
+						Scores: Scores{
+							TrustScore: 100,
+						},
 					},
+					Count: "1551",
 				},
 				nil,
 			},
@@ -1288,6 +1507,7 @@ const testJSONValid = `{
 	"ip": "76.14.47.42",
 	"city": "San Francisco",
 	"region": "California",
+	"region_code": "CA",
 	"country_name": "United States",
 	"country_code": "US",
 	"continent_name": "North America",
@@ -1305,12 +1525,14 @@ const testJSONValid = `{
 	"postal": "94132",
 	"calling_code": "1",
 	"flag": "https://ipdata.co/flags/us.png",
+	"emoji_flag": "\ud83c\uddfa\ud83c\uddf8",
 	"emoji_unicode": "U+1F1FA U+1F1F8",
 	"is_eu": true,
 	"languages": [
 		{
 			"name": "English",
-			"native": "English"
+			"native": "English",
+			"code": "en"
 		}
 	],
 	"currency": {
@@ -1319,6 +1541,17 @@ const testJSONValid = `{
 		"symbol": "$",
 		"native": "$",
 		"plural": "US dollars"
+	},
+	"company": {
+		"name": "vanoppen.biz LLC",
+		"domain": "wavebroadband.com",
+		"network": "76.14.0.0/17",
+		"type": "isp"
+	},
+	"carrier": {
+		"name": "T-Mobile",
+		"mcc": "310",
+		"mnc": "260"
 	},
 	"time_zone": {
 		"name": "America/Los_Angeles",
@@ -1329,13 +1562,25 @@ const testJSONValid = `{
 	},
 	"threat": {
 		"is_tor": false,
+		"is_vpn": false,
+		"is_icloud_relay": false,
 		"is_proxy": false,
+		"is_datacenter": false,
 		"is_anonymous": false,
 		"is_known_attacker": false,
 		"is_known_abuser": false,
 		"is_threat": true,
-		"is_bogon": false
-	}
+		"is_bogon": false,
+		"blocklists": [],
+		"scores": {
+			"vpn_score": 0,
+			"proxy_score": 0,
+			"threat_score": 1,
+			"trust_score": 99
+		}
+	},
+	"count": "1234",
+	"status": 200
 }`
 
 const testBulkJSONValid = `[
@@ -1354,7 +1599,7 @@ const testBulkJSONValid = `[
     "postal": null,
     "calling_code": "61",
     "flag": "https://ipdata.co/flags/au.png",
-    "emoji_flag": "🇦🇺",
+    "emoji_flag": "\ud83c\udde6\ud83c\uddfa",
     "emoji_unicode": "U+1F1E6 U+1F1FA",
     "asn": {
       "asn": "AS13335",
@@ -1363,10 +1608,17 @@ const testBulkJSONValid = `[
       "route": "1.1.1.0/24",
       "type": "hosting"
     },
+    "company": {
+      "name": "Cloudflare, Inc.",
+      "domain": "cloudflare.com",
+      "network": "1.1.1.0/24",
+      "type": "hosting"
+    },
     "languages": [
       {
         "name": "English",
-        "native": "English"
+        "native": "English",
+        "code": "en"
       }
     ],
     "currency": {
@@ -1385,12 +1637,22 @@ const testBulkJSONValid = `[
     },
     "threat": {
       "is_tor": false,
+      "is_vpn": false,
+      "is_icloud_relay": false,
       "is_proxy": false,
+      "is_datacenter": false,
       "is_anonymous": false,
       "is_known_attacker": false,
       "is_known_abuser": true,
       "is_threat": true,
-      "is_bogon": false
+      "is_bogon": false,
+      "blocklists": [],
+      "scores": {
+        "vpn_score": 0,
+        "proxy_score": 0,
+        "threat_score": 5,
+        "trust_score": 70
+      }
     },
     "count": "1551"
   },
@@ -1409,7 +1671,7 @@ const testBulkJSONValid = `[
     "postal": null,
     "calling_code": "1",
     "flag": "https://ipdata.co/flags/us.png",
-    "emoji_flag": "🇺🇸",
+    "emoji_flag": "\ud83c\uddfa\ud83c\uddf8",
     "emoji_unicode": "U+1F1FA U+1F1F8",
     "asn": {
       "asn": "AS15169",
@@ -1418,10 +1680,17 @@ const testBulkJSONValid = `[
       "route": "8.8.8.0/24",
       "type": "hosting"
     },
+    "company": {
+      "name": "Google LLC",
+      "domain": "google.com",
+      "network": "8.8.8.0/24",
+      "type": "business"
+    },
     "languages": [
       {
         "name": "English",
-        "native": "English"
+        "native": "English",
+        "code": "en"
       }
     ],
     "currency": {
@@ -1440,12 +1709,22 @@ const testBulkJSONValid = `[
     },
     "threat": {
       "is_tor": false,
+      "is_vpn": false,
+      "is_icloud_relay": false,
       "is_proxy": false,
+      "is_datacenter": false,
       "is_anonymous": false,
       "is_known_attacker": false,
       "is_known_abuser": false,
       "is_threat": false,
-      "is_bogon": false
+      "is_bogon": false,
+      "blocklists": [],
+      "scores": {
+        "vpn_score": 0,
+        "proxy_score": 0,
+        "threat_score": 0,
+        "trust_score": 100
+      }
     },
     "count": "1551"
   }
@@ -1467,7 +1746,7 @@ const testBulkJSONWithLocalhost = `[
     "postal": null,
     "calling_code": "61",
     "flag": "https://ipdata.co/flags/au.png",
-    "emoji_flag": "🇦🇺",
+    "emoji_flag": "\ud83c\udde6\ud83c\uddfa",
     "emoji_unicode": "U+1F1E6 U+1F1FA",
     "asn": {
       "asn": "AS13335",
@@ -1476,10 +1755,17 @@ const testBulkJSONWithLocalhost = `[
       "route": "1.1.1.0/24",
       "type": "hosting"
     },
+    "company": {
+      "name": "Cloudflare, Inc.",
+      "domain": "cloudflare.com",
+      "network": "1.1.1.0/24",
+      "type": "hosting"
+    },
     "languages": [
       {
         "name": "English",
-        "native": "English"
+        "native": "English",
+        "code": "en"
       }
     ],
     "currency": {
@@ -1498,12 +1784,22 @@ const testBulkJSONWithLocalhost = `[
     },
     "threat": {
       "is_tor": false,
+      "is_vpn": false,
+      "is_icloud_relay": false,
       "is_proxy": false,
+      "is_datacenter": false,
       "is_anonymous": false,
       "is_known_attacker": false,
       "is_known_abuser": true,
       "is_threat": true,
-      "is_bogon": false
+      "is_bogon": false,
+      "blocklists": [],
+      "scores": {
+        "vpn_score": 0,
+        "proxy_score": 0,
+        "threat_score": 5,
+        "trust_score": 70
+      }
     },
     "count": "1551"
   },
@@ -1522,7 +1818,7 @@ const testBulkJSONWithLocalhost = `[
     "postal": null,
     "calling_code": "1",
     "flag": "https://ipdata.co/flags/us.png",
-    "emoji_flag": "🇺🇸",
+    "emoji_flag": "\ud83c\uddfa\ud83c\uddf8",
     "emoji_unicode": "U+1F1FA U+1F1F8",
     "asn": {
       "asn": "AS15169",
@@ -1531,10 +1827,17 @@ const testBulkJSONWithLocalhost = `[
       "route": "8.8.8.0/24",
       "type": "hosting"
     },
+    "company": {
+      "name": "Google LLC",
+      "domain": "google.com",
+      "network": "8.8.8.0/24",
+      "type": "business"
+    },
     "languages": [
       {
         "name": "English",
-        "native": "English"
+        "native": "English",
+        "code": "en"
       }
     ],
     "currency": {
@@ -1553,12 +1856,22 @@ const testBulkJSONWithLocalhost = `[
     },
     "threat": {
       "is_tor": false,
+      "is_vpn": false,
+      "is_icloud_relay": false,
       "is_proxy": false,
+      "is_datacenter": false,
       "is_anonymous": false,
       "is_known_attacker": false,
       "is_known_abuser": false,
       "is_threat": false,
-      "is_bogon": false
+      "is_bogon": false,
+      "blocklists": [],
+      "scores": {
+        "vpn_score": 0,
+        "proxy_score": 0,
+        "threat_score": 0,
+        "trust_score": 100
+      }
     },
     "count": "1551"
   },

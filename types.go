@@ -33,15 +33,20 @@ type IP struct {
 
 	IsEU bool `json:"is_eu"`
 
-	Languages []Language `json:"language,omitempty"`
+	Languages []Language `json:"languages,omitempty"`
 
 	Currency *Currency `json:"currency,omitempty"`
 
 	Carrier *Carrier `json:"carrier,omitempty"`
 
+	Company *Company `json:"company,omitempty"`
+
 	TimeZone *TimeZone `json:"time_zone,omitempty"`
 
 	Threat *Threat `json:"threat,omitempty"`
+
+	Count  string `json:"count,omitempty"`
+	Status int    `json:"status,omitempty"`
 }
 
 func (ip IP) String() string {
@@ -64,11 +69,21 @@ type Carrier struct {
 	MNC  string `json:"mnc"`
 }
 
+// Company represents the company object within the JSON response from the API.
+// This provides information about the company that owns the IP address.
+type Company struct {
+	Name    string `json:"name"`
+	Domain  string `json:"domain"`
+	Network string `json:"network"`
+	Type    string `json:"type"`
+}
+
 // Language represents the language object within the JSON response from the
 // API. This provides information about the language(s) where that IP resides.
 type Language struct {
 	Name   string `json:"name"`
 	Native string `json:"native"`
+	Code   string `json:"code"`
 }
 
 // Currency represents the currency object within the JSON response from the
@@ -127,9 +142,10 @@ type bulkIP struct {
 	ASN          ASN    `json:"asn"`
 	Organization string `json:"organisation"`
 
-	City   string `json:"city"`
-	Region string `json:"region"`
-	Postal string `json:"postal"`
+	City       string `json:"city"`
+	Region     string `json:"region"`
+	RegionCode string `json:"region_code"`
+	Postal     string `json:"postal"`
 
 	CountryName string `json:"country_name"`
 	CountryCode string `json:"country_code"`
@@ -148,13 +164,20 @@ type bulkIP struct {
 
 	IsEU bool `json:"is_eu"`
 
-	Languages []Language `json:"language,omitempty"`
+	Languages []Language `json:"languages,omitempty"`
 
 	Currency *Currency `json:"currency,omitempty"`
+
+	Carrier *Carrier `json:"carrier,omitempty"`
+
+	Company *Company `json:"company,omitempty"`
 
 	TimeZone *TimeZone `json:"time_zone,omitempty"`
 
 	Threat *Threat `json:"threat,omitempty"`
+
+	Count  string `json:"count,omitempty"`
+	Status int    `json:"status,omitempty"`
 
 	Message string `json:"message"`
 }
@@ -166,6 +189,7 @@ func bulkToIP(bip bulkIP) *IP {
 		Organization:  bip.Organization,
 		City:          bip.City,
 		Region:        bip.Region,
+		RegionCode:    bip.RegionCode,
 		Postal:        bip.Postal,
 		CountryName:   bip.CountryName,
 		CountryCode:   bip.CountryCode,
@@ -179,8 +203,12 @@ func bulkToIP(bip bulkIP) *IP {
 		CallingCode:   bip.CallingCode,
 		IsEU:          bip.IsEU,
 		Currency:      bip.Currency,
+		Carrier:       bip.Carrier,
+		Company:       bip.Company,
 		TimeZone:      bip.TimeZone,
 		Threat:        bip.Threat,
+		Count:         bip.Count,
+		Status:        bip.Status,
 	}
 
 	if len(bip.Languages) > 0 {

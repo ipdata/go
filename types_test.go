@@ -30,6 +30,7 @@ func Test_bulkToIP(t *testing.T) {
 		Organization:  "vanoppen.biz LLC",
 		City:          "San Francisco",
 		Region:        "California",
+		RegionCode:    "CA",
 		Postal:        "94132",
 		CountryName:   "United States",
 		CountryCode:   "US",
@@ -41,13 +42,24 @@ func Test_bulkToIP(t *testing.T) {
 		Longitude:     -122.4842,
 		CallingCode:   "1",
 		IsEU:          true,
-		Languages:     []Language{{Name: "English (US)", Native: "en-us"}},
+		Languages:     []Language{{Name: "English (US)", Native: "en-us", Code: "en"}},
 		Currency: &Currency{
 			Name:   "US Dollar",
 			Code:   "USD",
 			Symbol: "$",
 			Native: "$",
 			Plural: "US dollars",
+		},
+		Carrier: &Carrier{
+			Name: "T-Mobile",
+			MCC:  "310",
+			MNC:  "260",
+		},
+		Company: &Company{
+			Name:    "vanoppen.biz LLC",
+			Domain:  "wavebroadband.com",
+			Network: "76.14.0.0/17",
+			Type:    "isp",
 		},
 		TimeZone: &TimeZone{
 			Name:         "America/Los_Angeles",
@@ -65,6 +77,7 @@ func Test_bulkToIP(t *testing.T) {
 			IsThreat:        true,
 			IsBogon:         false,
 		},
+		Count: "1234",
 	}
 
 	ip := &IP{
@@ -79,6 +92,7 @@ func Test_bulkToIP(t *testing.T) {
 		Organization:  "vanoppen.biz LLC",
 		City:          "San Francisco",
 		Region:        "California",
+		RegionCode:    "CA",
 		Postal:        "94132",
 		CountryName:   "United States",
 		CountryCode:   "US",
@@ -90,13 +104,24 @@ func Test_bulkToIP(t *testing.T) {
 		Longitude:     -122.4842,
 		CallingCode:   "1",
 		IsEU:          true,
-		Languages:     []Language{{Name: "English (US)", Native: "en-us"}},
+		Languages:     []Language{{Name: "English (US)", Native: "en-us", Code: "en"}},
 		Currency: &Currency{
 			Name:   "US Dollar",
 			Code:   "USD",
 			Symbol: "$",
 			Native: "$",
 			Plural: "US dollars",
+		},
+		Carrier: &Carrier{
+			Name: "T-Mobile",
+			MCC:  "310",
+			MNC:  "260",
+		},
+		Company: &Company{
+			Name:    "vanoppen.biz LLC",
+			Domain:  "wavebroadband.com",
+			Network: "76.14.0.0/17",
+			Type:    "isp",
 		},
 		TimeZone: &TimeZone{
 			Name:         "America/Los_Angeles",
@@ -114,6 +139,7 @@ func Test_bulkToIP(t *testing.T) {
 			IsThreat:        true,
 			IsBogon:         false,
 		},
+		Count: "1234",
 	}
 
 	got := bulkToIP(bip)
