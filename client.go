@@ -39,6 +39,18 @@ var userAgent = fmt.Sprintf(
 
 var errAPIKey = errors.New("apiKey cannot be an empty string")
 
+// Option is a functional option for configuring the Client.
+type Option func(*Client)
+
+// WithHTTPClient sets the underlying *http.Client used by the Client. This
+// allows callers to configure custom timeouts, proxies, transports, or
+// instrument the client with tracing (e.g. OpenTelemetry).
+func WithHTTPClient(httpClient *http.Client) Option {
+	return func(c *Client) {
+		c.c = httpClient
+	}
+}
+
 // Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
 type Client struct {
@@ -47,34 +59,46 @@ type Client struct {
 	k string       // api key
 }
 
-// NewClient takes an API key and returns a Client that uses the default
-// endpoint (https://api.ipdata.co/).
-func NewClient(apiKey string) (Client, error) {
+// NewClient takes an API key and optional Options, and returns a Client that
+// uses the default endpoint (https://api.ipdata.co/).
+func NewClient(apiKey string, opts ...Option) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
 	}
 
-	return Client{
+	c := Client{
 		c: newHTTPClient(),
 		e: apiEndpoint,
 		k: apiKey,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		opt(&c)
+	}
+
+	return c, nil
 }
 
-// NewEUClient takes an API key and returns a Client that uses the EU endpoint
-// (https://eu-api.ipdata.co/). This ensures that all requests are routed
-// through EU data centers only (Frankfurt, Paris, Ireland), which can be
-// useful for GDPR compliance.
-func NewEUClient(apiKey string) (Client, error) {
+// NewEUClient takes an API key and optional Options, and returns a Client that
+// uses the EU endpoint (https://eu-api.ipdata.co/). This ensures that all
+// requests are routed through EU data centers only (Frankfurt, Paris, Ireland),
+// which can be useful for GDPR compliance.
+func NewEUClient(apiKey string, opts ...Option) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
 	}
 
-	return Client{
+	c := Client{
 		c: newHTTPClient(),
 		e: euAPIEndpoint,
 		k: apiKey,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		opt(&c)
+	}
+
+	return c, nil
 }
 
 type apiErr struct {
