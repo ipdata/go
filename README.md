@@ -1,6 +1,7 @@
 # ipdata
+[![CI](https://github.com/ipdata/go/actions/workflows/ci.yml/badge.svg)](https://github.com/ipdata/go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ipdata/go.svg)](https://pkg.go.dev/github.com/ipdata/go)
 [![License](https://img.shields.io/github/license/ipdata/go.svg)](https://github.com/ipdata/go/blob/master/LICENSE)
-[![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://pkg.go.dev/github.com/ipdata/go)
 [![Latest Git Tag](https://img.shields.io/github/tag/ipdata/go.svg)](https://github.com/ipdata/go/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ipdata/go)](https://goreportcard.com/report/github.com/ipdata/go)
 
