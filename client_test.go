@@ -304,6 +304,40 @@ func TestNewEUClient(t *testing.T) {
 	}
 }
 
+func TestNewClient_WithHTTPClient(t *testing.T) {
+	custom := &http.Client{Timeout: 5 * time.Second}
+
+	c, err := NewClient("testAPIkey", WithHTTPClient(custom))
+	if err != nil {
+		t.Fatalf("NewClient() unexpected error: %v", err)
+	}
+
+	if c.c != custom {
+		t.Fatal("expected custom http.Client to be used")
+	}
+
+	if c.e != "https://api.ipdata.co/" {
+		t.Fatalf("c.e = %q, want %q", c.e, "https://api.ipdata.co/")
+	}
+}
+
+func TestNewEUClient_WithHTTPClient(t *testing.T) {
+	custom := &http.Client{Timeout: 5 * time.Second}
+
+	c, err := NewEUClient("testAPIkey", WithHTTPClient(custom))
+	if err != nil {
+		t.Fatalf("NewEUClient() unexpected error: %v", err)
+	}
+
+	if c.c != custom {
+		t.Fatal("expected custom http.Client to be used")
+	}
+
+	if c.e != "https://eu-api.ipdata.co/" {
+		t.Fatalf("c.e = %q, want %q", c.e, "https://eu-api.ipdata.co/")
+	}
+}
+
 const tjFlagURL = "https://ipdata.co/flags/us.png"
 
 func Test_client_Lookup(t *testing.T) {
