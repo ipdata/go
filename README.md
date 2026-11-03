@@ -252,6 +252,16 @@ The `IP` struct includes all fields from the ipdata API response:
 
 **`Scores`** (`Threat.Scores`): `VPNScore`, `ProxyScore`, `ThreatScore`, `TrustScore`; each is a number from 0 to 100, and a higher `TrustScore` means a more trustworthy address
 
+## Releasing
+
+Releases are cut by CI from the `Version` constant in `client.go`. To publish
+a new version, bump `Version` in a pull request and merge it: the push to
+`master` runs the `release` job of the CI workflow, which tags the merge commit
+`vX.Y.Z` and creates the GitHub release for it with generated notes. Nothing
+else needs publishing: Go modules are fetched straight from the tag, so
+`go get github.com/ipdata/go@vX.Y.Z` works as soon as it exists. A merge whose
+`Version` is already tagged releases nothing.
+
 ## Contributors
 
 - [Tim Heckman](https://github.com/theckman/) - Created the first version of this library
