@@ -29,9 +29,10 @@ const Version = "0.8.2"
 const fqpn = "github.com/ipdata/go"
 
 const (
-	apiEndpoint   = "https://api.ipdata.co/"
-	euAPIEndpoint = "https://eu-api.ipdata.co/"
-	apiAuthParam  = "api-key"
+	apiEndpoint    = "https://api.ipdata.co/"
+	euAPIEndpoint  = "https://eu-api.ipdata.co/"
+	apiAuthParam   = "api-key"
+	apiFieldsParam = "fields"
 )
 
 var userAgent = fmt.Sprintf(
@@ -140,8 +141,16 @@ func (c Client) RawLookup(ip string) (*http.Response, error) {
 
 // RawLookupWithContext is a RawLookup that uses a provided context.Context.
 func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Response, error) {
+	return c.rawLookup(ctx, ip, nil)
+}
+
+// rawLookup sends the GET request for ip, with params (which may be nil) and
+// the API key as the query string, and returns the response when its status is
+// 200 OK. Any other status becomes an error, of type Error when the body holds
+// the API's JSON message, and the response body is closed.
+func (c Client) rawLookup(ctx context.Context, ip string, params url.Values) (*http.Response, error) {
 	// build request
-	req, err := newGetRequestWithContext(ctx, c.e+ip, c.k)
+	req, err := newGetRequestWithContext(ctx, c.e+ip, c.k, params)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error building request to look up %s", ip)
 	}
@@ -192,7 +201,7 @@ func decodeIP(r io.Reader) (IP, error) {
 }
 
 // Lookup takes an IP address to look up the details for. An empty string means
-// you want the information about the current node's pubilc IP address. If an
+// you want the information about the current node's public IP address. If an
 // API error occurs, the error value will be of type Error.
 func (c Client) Lookup(ip string) (IP, error) {
 	return c.LookupWithContext(context.Background(), ip)
@@ -200,7 +209,29 @@ func (c Client) Lookup(ip string) (IP, error) {
 
 // LookupWithContext is a Lookup that uses a provided context.Context.
 func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
-	resp, err := c.RawLookupWithContext(ctx, ip)
+	return c.lookup(ctx, ip, nil)
+}
+
+// LookupFields takes an IP address and a list of fields to return. Only the
+// specified fields will be populated in the response. If an API error occurs,
+// the error value will be of type Error.
+func (c Client) LookupFields(ip string, fields []string) (IP, error) {
+	return c.LookupFieldsWithContext(context.Background(), ip, fields)
+}
+
+// LookupFieldsWithContext is a LookupFields that uses a provided context.Context.
+func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields []string) (IP, error) {
+	var params url.Values
+	if len(fields) > 0 {
+		params = url.Values{apiFieldsParam: []string{strings.Join(fields, ",")}}
+	}
+
+	return c.lookup(ctx, ip, params)
+}
+
+// lookup performs rawLookup and decodes the body of the 200 OK response.
+func (c Client) lookup(ctx context.Context, ip string, params url.Values) (IP, error) {
+	resp, err := c.rawLookup(ctx, ip, params)
 	if err != nil {
 		return IP{}, err
 	}
@@ -218,57 +249,10 @@ func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
 	return pip, nil
 }
 
-// LookupFields takes an IP address and a list of fields to return. Only the
-// specified fields will be populated in the response. If an API error occurs,
-// the error value will be of type Error.
-func (c Client) LookupFields(ip string, fields []string) (IP, error) {
-	return c.LookupFieldsWithContext(context.Background(), ip, fields)
-}
-
-// LookupFieldsWithContext is a LookupFields that uses a provided context.Context.
-func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields []string) (IP, error) {
-	reqURL := c.e + ip
-	if len(fields) > 0 {
-		reqURL += "?fields=" + strings.Join(fields, ",")
-	}
-
-	req, err := newGetRequestWithContext(ctx, reqURL, c.k)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "error building request to look up %s", ip)
-	}
-
-	resp, err := c.c.Do(req)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
-	}
-
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		pip, err := decodeIP(resp.Body)
-		if err != nil {
-			return IP{}, err
-		}
-		return pip, nil
-	default:
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
-		}
-
-		var a apiErr
-		if err := json.Unmarshal(body, &a); err != nil {
-			return IP{}, errors.Errorf("request for %q failed (unexpected response): %s: %v", ip, resp.Status, err)
-		}
-		return IP{}, newError(a.Message, resp.StatusCode)
-	}
-}
-
-func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http.Request, error) {
+// newGetRequestWithContext builds the GET request for urlStr. Its query string
+// is built from params plus the API key, which always takes precedence over a
+// value in params; params may be nil and is left unchanged.
+func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string, params url.Values) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
 	}
@@ -285,7 +269,11 @@ func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
 
-	q := url.Values{apiAuthParam: []string{apiKey}}
+	q := make(url.Values, len(params)+1)
+	for name, values := range params {
+		q[name] = values
+	}
+	q.Set(apiAuthParam, apiKey)
 	req.URL.RawQuery = q.Encode()
 
 	return req, nil

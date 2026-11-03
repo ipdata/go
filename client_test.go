@@ -586,6 +586,9 @@ func Test_client_Lookup(t *testing.T) {
 }
 
 func Test_client_LookupFields(t *testing.T) {
+	// query holds the query string of the last request the server received
+	var query atomic.Pointer[url.Values]
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/76.14.47.42", func(w http.ResponseWriter, r *http.Request) {
@@ -593,6 +596,9 @@ func Test_client_LookupFields(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+
+		q := r.URL.Query()
+		query.Store(&q)
 
 		if r.FormValue("api-key") != "testAPIkey" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -619,10 +625,32 @@ func Test_client_LookupFields(t *testing.T) {
 		k: "testAPIkey",
 	}
 
+	// lastQuery returns the query string of the last request the server saw
+	lastQuery := func(t *testing.T) url.Values {
+		t.Helper()
+
+		q := query.Load()
+		if q == nil {
+			t.Fatal("the server received no request")
+		}
+
+		return *q
+	}
+
 	t.Run("with_fields", func(t *testing.T) {
 		ip, err := c.LookupFields("76.14.47.42", []string{"ip", "country_name"})
 		if err != nil {
 			t.Fatalf("LookupFields() unexpected error: %v", err)
+		}
+
+		q := lastQuery(t)
+
+		if got, want := q.Get("fields"), "ip,country_name"; got != want {
+			t.Errorf("request query fields = %q, want %q", got, want)
+		}
+
+		if got, want := q.Get("api-key"), "testAPIkey"; got != want {
+			t.Errorf("request query api-key = %q, want %q", got, want)
 		}
 
 		if ip.IP != "76.14.47.42" {
@@ -631,6 +659,12 @@ func Test_client_LookupFields(t *testing.T) {
 
 		if ip.CountryName != "United States" {
 			t.Errorf("ip.CountryName = %q, want %q", ip.CountryName, "United States")
+		}
+
+		// the partial response the server sends for a request with fields
+		// has no city; a city means the full document came back
+		if ip.City != "" {
+			t.Errorf("ip.City = %q, want %q (fields were not applied)", ip.City, "")
 		}
 	})
 
@@ -640,12 +674,26 @@ func Test_client_LookupFields(t *testing.T) {
 			t.Fatalf("LookupFields() unexpected error: %v", err)
 		}
 
+		q := lastQuery(t)
+
+		if _, ok := q["fields"]; ok {
+			t.Errorf("request query fields = %q, want no fields parameter", q.Get("fields"))
+		}
+
+		if got, want := q.Get("api-key"), "testAPIkey"; got != want {
+			t.Errorf("request query api-key = %q, want %q", got, want)
+		}
+
 		if ip.IP != "76.14.47.42" {
 			t.Errorf("ip.IP = %q, want %q", ip.IP, "76.14.47.42")
 		}
 
 		if ip.CountryName != "United States" {
 			t.Errorf("ip.CountryName = %q, want %q", ip.CountryName, "United States")
+		}
+
+		if ip.City != "San Francisco" {
+			t.Errorf("ip.City = %q, want %q", ip.City, "San Francisco")
 		}
 	})
 }
@@ -777,9 +825,10 @@ func mustParseURL(u string) *url.URL {
 
 func Test_newGetRequestWithContext(t *testing.T) {
 	tests := []struct {
-		name string
-		url  string
-		key  string
+		name   string
+		url    string
+		key    string
+		params url.Values
 
 		want *http.Request
 		err  string
@@ -805,17 +854,53 @@ func Test_newGetRequestWithContext(t *testing.T) {
 				URL: mustParseURL("http://localhost/?api-key=abc123"),
 			},
 		},
+		{
+			name:   "url_with_params",
+			key:    "abc123",
+			url:    "http://localhost/",
+			params: url.Values{"fields": {"ip,country_name"}},
+			want: &http.Request{
+				Header: map[string][]string{
+					"User-Agent": {userAgent},
+					"Accept":     {"application/json"},
+				},
+				URL: mustParseURL("http://localhost/?api-key=abc123&fields=ip%2Ccountry_name"),
+			},
+		},
+		{
+			name:   "params_do_not_replace_api_key",
+			key:    "abc123",
+			url:    "http://localhost/",
+			params: url.Values{"api-key": {"other"}, "fields": {"ip"}},
+			want: &http.Request{
+				Header: map[string][]string{
+					"User-Agent": {userAgent},
+					"Accept":     {"application/json"},
+				},
+				URL: mustParseURL("http://localhost/?api-key=abc123&fields=ip"),
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := newGetRequestWithContext(context.Background(), tt.url, tt.key)
+			before := tt.params.Encode()
+
+			got, err := newGetRequestWithContext(context.Background(), tt.url, tt.key, tt.params)
 			if cont := testErrCheck(t, "newGetRequestWithContext()", tt.err, err); !cont {
 				return
 			}
 
 			if gots, wants := got.URL.String(), tt.want.URL.String(); gots != wants {
 				t.Fatalf("got.URL = %q, want %q", gots, wants)
+			}
+
+			if gots, wants := got.URL.Query().Get("fields"), tt.params.Get("fields"); gots != wants {
+				t.Fatalf("fields query parameter = %q, want %q", gots, wants)
+			}
+
+			if after := tt.params.Encode(); after != before {
+				t.Fatalf("params = %q after the call, want them unchanged (%q)", after, before)
 			}
 
 			if gots, wants := got.Header.Get("User-Agent"), tt.want.Header.Get("User-Agent"); gots != wants {
