@@ -250,6 +250,8 @@ The `IP` struct includes all fields from the ipdata API response:
 - `LastSeen` (`string`): last day the address was listed, as `YYYY-MM-DD` (UTC); empty when not reported
 - `DaysSeen` (`*int`): number of days the address was listed; `nil` when not reported
 
+**`Scores`** (`Threat.Scores`): `VPNScore`, `ProxyScore`, `ThreatScore`, `TrustScore`; each is a number from 0 to 100, and a higher `TrustScore` means a more trustworthy address
+
 ## Contributors
 
 - [Tim Heckman](https://github.com/theckman/) - Created the first version of this library

@@ -112,7 +112,9 @@ type TimeZone struct {
 }
 
 // Threat represents the threat object within the JSON response from the API.
-// This provides information about what type of threat this IP may be.
+// This provides information about what type of threat this IP may be: the
+// boolean fields classify the address, Blocklists lists the feeds that include
+// it (see Blocklist) and Scores holds the threat scores (see Scores).
 type Threat struct {
 	IsTOR           bool        `json:"is_tor"`
 	IsVPN           bool        `json:"is_vpn"`
@@ -143,6 +145,11 @@ type Blocklist struct {
 	DaysSeen  *int   `json:"days_seen,omitempty"`
 }
 
+// Scores represents the scores object within the threat object of the JSON
+// response from the API. Each score is a number from 0 to 100: VPNScore,
+// ProxyScore and ThreatScore give how likely the IP address is a VPN, a proxy
+// or a threat, and TrustScore how trustworthy it is, a higher value meaning a
+// more trustworthy address.
 type Scores struct {
 	VPNScore    int `json:"vpn_score"`
 	ProxyScore  int `json:"proxy_score"`

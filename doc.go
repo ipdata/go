@@ -9,7 +9,7 @@
 //
 // If you have any problems with this client, please raise an issue on GitHub:
 //
-// * https://github.com/theckman/go-ipdata/issues
+// * https://github.com/ipdata/go/issues
 //
 // Example usage:
 //
