@@ -33,6 +33,11 @@ type IP struct {
 
 	IsEU bool `json:"is_eu"`
 
+	// IsSatellite and IsAnycast are present in the API response only when
+	// true, so they read false whenever the key is absent.
+	IsSatellite bool `json:"is_satellite"`
+	IsAnycast   bool `json:"is_anycast"`
+
 	Languages []Language `json:"languages,omitempty"`
 
 	Currency *Currency `json:"currency,omitempty"`
@@ -109,32 +114,40 @@ type TimeZone struct {
 // Threat represents the threat object within the JSON response from the API.
 // This provides information about what type of threat this IP may be.
 type Threat struct {
-    IsTOR            bool        `json:"is_tor"`
-    IsVPN            bool        `json:"is_vpn"`
-    IsICloudRelay    bool        `json:"is_icloud_relay"`
-    IsProxy          bool        `json:"is_proxy"`
-    IsDatacenter     bool        `json:"is_datacenter"`
-    IsAnonymous      bool        `json:"is_anonymous"`
-    IsKnownAttacker  bool        `json:"is_known_attacker"`
-    IsKnownAbuser    bool        `json:"is_known_abuser"`
-    IsThreat         bool        `json:"is_threat"`
-    IsBogon          bool        `json:"is_bogon"`
-    Blocklists       []Blocklist `json:"blocklists"`
-    Scores           Scores      `json:"scores"`
+	IsTOR           bool        `json:"is_tor"`
+	IsVPN           bool        `json:"is_vpn"`
+	IsICloudRelay   bool        `json:"is_icloud_relay"`
+	IsProxy         bool        `json:"is_proxy"`
+	IsDatacenter    bool        `json:"is_datacenter"`
+	IsAnonymous     bool        `json:"is_anonymous"`
+	IsKnownAttacker bool        `json:"is_known_attacker"`
+	IsKnownAbuser   bool        `json:"is_known_abuser"`
+	IsThreat        bool        `json:"is_threat"`
+	IsBogon         bool        `json:"is_bogon"`
+	Blocklists      []Blocklist `json:"blocklists"`
+	Scores          Scores      `json:"scores"`
 }
 
+// Blocklist represents one entry of the threat.blocklists array: a feed that
+// lists the IP address. FirstSeen and LastSeen are the first and last day the
+// address was seen on the feed, as calendar dates in YYYY-MM-DD form (UTC)
+// kept as strings, and DaysSeen is the number of days it was listed. Some
+// feeds, for example ipdata's own vpn feed, report none of the three: the
+// dates are then empty strings and DaysSeen is nil.
 type Blocklist struct {
-    Name string `json:"name"`
-    Site string `json:"site"`
-    Type string `json:"type"`
+	Name      string `json:"name"`
+	Site      string `json:"site"`
+	Type      string `json:"type"`
+	FirstSeen string `json:"first_seen,omitempty"`
+	LastSeen  string `json:"last_seen,omitempty"`
+	DaysSeen  *int   `json:"days_seen,omitempty"`
 }
-
 
 type Scores struct {
-    VPNScore    int `json:"vpn_score"`
-    ProxyScore  int `json:"proxy_score"`
-    ThreatScore int `json:"threat_score"`
-    TrustScore  int `json:"trust_score"`
+	VPNScore    int `json:"vpn_score"`
+	ProxyScore  int `json:"proxy_score"`
+	ThreatScore int `json:"threat_score"`
+	TrustScore  int `json:"trust_score"`
 }
 
 type bulkIP struct {
@@ -162,7 +175,9 @@ type bulkIP struct {
 
 	CallingCode string `json:"calling_code"`
 
-	IsEU bool `json:"is_eu"`
+	IsEU        bool `json:"is_eu"`
+	IsSatellite bool `json:"is_satellite"`
+	IsAnycast   bool `json:"is_anycast"`
 
 	Languages []Language `json:"languages,omitempty"`
 
@@ -202,6 +217,8 @@ func bulkToIP(bip bulkIP) *IP {
 		Longitude:     bip.Longitude,
 		CallingCode:   bip.CallingCode,
 		IsEU:          bip.IsEU,
+		IsSatellite:   bip.IsSatellite,
+		IsAnycast:     bip.IsAnycast,
 		Currency:      bip.Currency,
 		Carrier:       bip.Carrier,
 		Company:       bip.Company,

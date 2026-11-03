@@ -12,19 +12,21 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
 )
 
 // Version is the package version
-const Version = "0.8.0"
+const Version = "0.8.2"
 
 // fqpn is the Fully Qualified Package Name for use in the client's User-Agent
-const fqpn = "github.com/theckman/go-ipdata"
+const fqpn = "github.com/ipdata/go"
 
 const (
 	apiEndpoint   = "https://api.ipdata.co/"
@@ -53,6 +55,14 @@ func WithHTTPClient(httpClient *http.Client) Option {
 
 // Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
+//
+// A Client owns a pool of persistent HTTPS connections (HTTP/2 where the
+// server negotiates it, HTTP/1.1 keep-alive otherwise) that is reused for
+// every request made through it. Build one Client per process, or one per API
+// key or endpoint, and keep it for the lifetime of the program: every new
+// Client pays a fresh TCP and TLS handshake. A Client is safe for concurrent
+// use by multiple goroutines. Call CloseIdleConnections at shutdown to release
+// the pooled connections.
 type Client struct {
 	c *http.Client // http client
 	e string       // api endpoint
@@ -101,6 +111,21 @@ func NewEUClient(apiKey string, opts ...Option) (Client, error) {
 	return c, nil
 }
 
+// CloseIdleConnections closes the pooled connections of the underlying
+// *http.Client that are currently idle. Requests in flight are not
+// interrupted, and the Client stays usable: the next request simply dials a
+// new connection. Call it at shutdown, or before a long idle period, to
+// release sockets eagerly instead of waiting for the 60 second idle timeout.
+// It is a no-op for a Client that has no *http.Client, or whose custom
+// transport does not implement CloseIdleConnections.
+func (c Client) CloseIdleConnections() {
+	if c.c == nil {
+		return
+	}
+
+	c.c.CloseIdleConnections()
+}
+
 type apiErr struct {
 	Message string `json:"message"`
 }
@@ -132,7 +157,10 @@ func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Resp
 		// we can try and parse
 		return resp, nil
 	default:
-		// provide response body as error to consumer
+		// provide response body as error to consumer; closing the body hands
+		// the connection back to the pool
+		defer resp.Body.Close()
+
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
@@ -270,17 +298,10 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 }
 
 // RawBulkLookupWithContext is a RawBulkLookup with a provided context.Context.
-	func (c *Client) RawBulkLookupWithContext(ctx context.Context, ips []string) (*http.Response, error) {
-	// build request
-	req, err := newBulkPostRequestWithContext(ctx, c.e+"bulk", c.k, ips)
+func (c *Client) RawBulkLookupWithContext(ctx context.Context, ips []string) (*http.Response, error) {
+	resp, err := c.doBulkRequest(ctx, ips)
 	if err != nil {
-		return nil, errors.Wrap(err, "error building bulk lookup request")
-	}
-
-	// action request
-	resp, err := c.c.Do(req)
-	if err != nil {
-		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
+		return nil, err
 	}
 
 	switch resp.StatusCode {
@@ -288,7 +309,10 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 		// we can try and parse
 		return resp, nil
 	default:
-		// provide response body as error to consumer
+		// provide response body as error to consumer; closing the body hands
+		// the connection back to the pool
+		defer resp.Body.Close()
+
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
@@ -302,6 +326,86 @@ func (c *Client) RawBulkLookup(ips []string) (*http.Response, error) {
 
 		return nil, newError(a.Message, resp.StatusCode)
 	}
+}
+
+// doBulkRequest builds and sends the bulk lookup POST.
+//
+// The bulk endpoint is not idempotent, so net/http only replays the request on
+// its own when nothing was written to the connection yet. When a pooled
+// connection that the server side had already dropped is picked, the request
+// bytes go out and the read then fails (EOF, reset) before any response byte
+// arrived; net/http discards that connection and reports the error. In exactly
+// that situation doBulkRequest sends the request one more time, over a fresh
+// or another pooled connection. It never retries after a response started to
+// arrive, on an HTTP status, after a cancellation or timeout, or when the
+// failed connection was not a reused one.
+func (c *Client) doBulkRequest(ctx context.Context, ips []string) (*http.Response, error) {
+	var ct connTracker
+
+	// build request
+	req, err := newBulkPostRequestWithContext(ct.trace(ctx), c.e+"bulk", c.k, ips)
+	if err != nil {
+		return nil, errors.Wrap(err, "error building bulk lookup request")
+	}
+
+	// action request
+	resp, err := c.c.Do(req)
+	if err != nil && ctx.Err() == nil && ct.staleConn(err) {
+		// the body of the first request has been consumed: build a new one
+		retry, rerr := newBulkPostRequestWithContext(ctx, c.e+"bulk", c.k, ips)
+		if rerr == nil {
+			resp, err = c.c.Do(retry)
+		}
+	}
+
+	if err != nil {
+		return nil, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
+	}
+
+	return resp, nil
+}
+
+// connTracker records, through net/http/httptrace, whether the connection a
+// request went out on had been used before and whether any byte of the
+// response arrived. Both facts are needed to tell a request that was lost on a
+// stale pooled connection apart from one the server may have acted on.
+type connTracker struct {
+	reused       atomic.Bool
+	gotFirstByte atomic.Bool
+}
+
+// trace returns ctx with the tracker's hooks attached; hooks already present
+// in ctx keep running.
+func (ct *connTracker) trace(ctx context.Context) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			ct.reused.Store(info.Reused)
+		},
+		GotFirstResponseByte: func() {
+			ct.gotFirstByte.Store(true)
+		},
+	})
+}
+
+// staleConn reports whether err, returned by (*http.Client).Do, means the
+// request died on a previously used connection before the server answered:
+// the connection was reused, no response byte arrived, and the failure is
+// neither a cancellation nor a timeout.
+func (ct *connTracker) staleConn(err error) bool {
+	if !ct.reused.Load() || ct.gotFirstByte.Load() {
+		return false
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return false
+	}
+
+	return true
 }
 
 func newBulkPostRequestWithContext(ctx context.Context, urlStr, apiKey string, ips []string) (*http.Request, error) {
@@ -401,6 +505,14 @@ func (c *Client) BulkLookupWithContext(ctx context.Context, ips []string) ([]*IP
 	return res, nil // avoid nil interface check problem
 }
 
+// newHTTPClient builds the *http.Client a Client uses unless WithHTTPClient
+// supplies one. Its transport keeps a pool of persistent connections for the
+// lifetime of the Client: TCP keepalive probes every 30 seconds, pooled
+// connections are closed after 60 seconds idle, HTTP/2 is negotiated through
+// ALPN with an HTTP/1.1 fallback (ForceAttemptHTTP2 is needed because a custom
+// DialContext otherwise switches the automatic HTTP/2 setup off), and idle
+// HTTP/2 connections are health checked with a PING frame every 30 seconds,
+// closing the connection when no answer arrives within 15 seconds.
 func newHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -409,6 +521,11 @@ func newHTTPClient() *http.Client {
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
+			ForceAttemptHTTP2: true,
+			HTTP2: &http.HTTP2Config{
+				SendPingTimeout: 30 * time.Second,
+				PingTimeout:     15 * time.Second,
+			},
 			MaxIdleConns:          100,
 			IdleConnTimeout:       60 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,

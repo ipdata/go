@@ -13,8 +13,18 @@
 //
 // Example usage:
 //
-// 	import "github.com/theckman/go-ipdata"
+//	import "github.com/ipdata/go"
 //
-// 	ipd := ipdata.NewClient("") // API key is optional
-// 	data, err := ipd.Lookup("8.8.8.8")
+//	ipd, err := ipdata.NewClient("YOUR_API_KEY")
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	data, err := ipd.Lookup("8.8.8.8")
+//
+// A Client keeps a pool of persistent HTTPS connections (HTTP/2 when the
+// server negotiates it) for as long as it lives, so build one Client and reuse
+// it for every lookup instead of creating one per request. A Client is safe
+// for concurrent use by multiple goroutines; call CloseIdleConnections at
+// shutdown to release the pooled connections.
 package ipdata

@@ -5,7 +5,10 @@
 package ipdata
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +115,11 @@ func testBulkHTTPServer() *httptest.Server {
 			fmt.Fprintf(w, `ip slice wrong inputs, want ["1.1.1.1","8.8.8.8"] got: %#v`, ips)
 			return
 		case 3:
+			if ips[0] == "98.97.34.0" && ips[1] == "8.8.8.8" && ips[2] == "187.13.250.1" {
+				fmt.Fprint(w, testBulkJSONNewFields)
+				return
+			}
+
 			if ips[0] == "1.1.1.1" && ips[1] == "8.8.8.8" && ips[2] == "127.0.0.1" {
 				fmt.Fprint(w, testBulkJSONWithLocalhost)
 				return
@@ -1913,3 +1922,705 @@ const testBulkJSONWithLocalhost = `[
     "message": "127.0.0.1 is a private IP address"
   }
 ]`
+
+// roundTripperFunc adapts a function to http.RoundTripper. It deliberately has
+// no CloseIdleConnections method.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// connCounter counts the TCP connections an *http.Server accepted.
+type connCounter struct {
+	n atomic.Int32
+}
+
+func (cc *connCounter) connState(_ net.Conn, s http.ConnState) {
+	if s == http.StateNew {
+		cc.n.Add(1)
+	}
+}
+
+// testReuseHandler serves canned lookup, error and bulk responses without
+// checking the API key.
+func testReuseHandler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/76.14.47.42", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONValid)
+	})
+
+	mux.HandleFunc("/192.168.0.1", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message": "192.168.0.1 is a private IP address"}`)
+	})
+
+	mux.HandleFunc("/bulk", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testBulkJSONValid)
+	})
+
+	return mux
+}
+
+// trustServerCert makes the transport of hc trust the certificate of the
+// httptest TLS server srv. It must run before hc sends its first request.
+func trustServerCert(t *testing.T, hc *http.Client, srv *httptest.Server) {
+	t.Helper()
+
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("hc.Transport is %T, want *http.Transport", hc.Transport)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool}
+}
+
+func Test_newHTTPClient_transport(t *testing.T) {
+	tr, ok := newHTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("newHTTPClient().Transport is not an *http.Transport")
+	}
+
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("tr.ForceAttemptHTTP2 = false, want true")
+	}
+
+	if tr.HTTP2 == nil {
+		t.Fatal("tr.HTTP2 = nil, want HTTP/2 keepalive configuration")
+	}
+
+	if got, want := tr.HTTP2.SendPingTimeout, 30*time.Second; got != want {
+		t.Errorf("tr.HTTP2.SendPingTimeout = %s, want %s", got, want)
+	}
+
+	if got, want := tr.HTTP2.PingTimeout, 15*time.Second; got != want {
+		t.Errorf("tr.HTTP2.PingTimeout = %s, want %s", got, want)
+	}
+
+	if got, want := tr.IdleConnTimeout, 60*time.Second; got != want {
+		t.Errorf("tr.IdleConnTimeout = %s, want %s", got, want)
+	}
+
+	if tr.Proxy == nil {
+		t.Error("tr.Proxy = nil, want http.ProxyFromEnvironment")
+	}
+}
+
+func Test_newHTTPClient_http2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(testReuseHandler())
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	hc := newHTTPClient()
+	trustServerCert(t, hc, srv)
+
+	c := Client{c: hc, e: srv.URL + "/", k: "testAPIkey"}
+
+	resp, err := c.RawLookup("76.14.47.42")
+	if err != nil {
+		t.Fatalf("RawLookup() unexpected error: %v", err)
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.Proto != "HTTP/2.0" {
+		t.Fatalf("resp.Proto = %q, want %q", resp.Proto, "HTTP/2.0")
+	}
+
+	if resp.TLS == nil {
+		t.Fatal("resp.TLS = nil, want the TLS connection state")
+	}
+
+	if resp.TLS.NegotiatedProtocol != "h2" {
+		t.Fatalf("resp.TLS.NegotiatedProtocol = %q, want %q", resp.TLS.NegotiatedProtocol, "h2")
+	}
+
+	ip, err := c.Lookup("76.14.47.42")
+	if err != nil {
+		t.Fatalf("Lookup() unexpected error: %v", err)
+	}
+
+	if ip.IP != "76.14.47.42" {
+		t.Fatalf("ip.IP = %q, want %q", ip.IP, "76.14.47.42")
+	}
+}
+
+func Test_client_connectionReuse(t *testing.T) {
+	tests := []struct {
+		name  string
+		tls   bool
+		proto string
+	}{
+		{name: "http1_keepalive", proto: "HTTP/1.1"},
+		{name: "https_http2", tls: true, proto: "HTTP/2.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var conns connCounter
+
+			srv := httptest.NewUnstartedServer(testReuseHandler())
+			srv.Config.ConnState = conns.connState
+
+			hc := newHTTPClient()
+
+			if tt.tls {
+				srv.EnableHTTP2 = true
+				srv.StartTLS()
+				trustServerCert(t, hc, srv)
+			} else {
+				srv.Start()
+			}
+
+			defer srv.Close()
+
+			c := Client{c: hc, e: srv.URL + "/", k: "testAPIkey"}
+
+			for i := 0; i < 5; i++ {
+				if _, err := c.Lookup("76.14.47.42"); err != nil {
+					t.Fatalf("Lookup() #%d unexpected error: %v", i+1, err)
+				}
+			}
+
+			// error responses must hand their connection back as well
+			if _, err := c.Lookup("192.168.0.1"); err == nil {
+				t.Fatal("Lookup() of a private address: error expected but was nil")
+			}
+
+			if _, err := c.RawLookup("192.168.0.1"); err == nil {
+				t.Fatal("RawLookup() of a private address: error expected but was nil")
+			}
+
+			for i := 0; i < 3; i++ {
+				if _, err := c.BulkLookup([]string{"1.1.1.1", "8.8.8.8"}); err != nil {
+					t.Fatalf("BulkLookup() #%d unexpected error: %v", i+1, err)
+				}
+			}
+
+			resp, err := c.RawLookup("76.14.47.42")
+			if err != nil {
+				t.Fatalf("RawLookup() unexpected error: %v", err)
+			}
+
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+
+			if resp.Proto != tt.proto {
+				t.Errorf("resp.Proto = %q, want %q", resp.Proto, tt.proto)
+			}
+
+			if n := conns.n.Load(); n != 1 {
+				t.Fatalf("server accepted %d connections for 11 sequential requests, want 1", n)
+			}
+
+			// closing the idle connection forces the next request to dial again
+			c.CloseIdleConnections()
+
+			if _, err := c.Lookup("76.14.47.42"); err != nil {
+				t.Fatalf("Lookup() after CloseIdleConnections() unexpected error: %v", err)
+			}
+
+			if n := conns.n.Load(); n != 2 {
+				t.Fatalf("server accepted %d connections after CloseIdleConnections(), want 2", n)
+			}
+		})
+	}
+}
+
+func TestClient_CloseIdleConnections(t *testing.T) {
+	// a zero Client has no *http.Client and must not panic
+	Client{}.CloseIdleConnections()
+
+	// no Transport: delegates to http.DefaultTransport
+	c, err := NewClient("testAPIkey", WithHTTPClient(&http.Client{}))
+	if err != nil {
+		t.Fatalf("NewClient() unexpected error: %v", err)
+	}
+
+	c.CloseIdleConnections()
+
+	// a transport without a CloseIdleConnections method is a no-op
+	rt := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	c, err = NewEUClient("testAPIkey", WithHTTPClient(&http.Client{Transport: rt}))
+	if err != nil {
+		t.Fatalf("NewEUClient() unexpected error: %v", err)
+	}
+
+	c.CloseIdleConnections()
+}
+
+// actions of a scriptedServer, one per request received
+const (
+	srvRespond = iota // answer with 200 and the configured body
+	srvDrop           // read the request, then close the connection without answering
+	srvPartial        // write the start of a response, then close the connection
+	srvReject         // answer with a 403 API error
+)
+
+// scriptedServer is a raw HTTP/1.1 keep-alive server that follows a
+// per-request script, so a test can drop a pooled connection at a precise
+// point. Requests beyond the script are answered normally.
+type scriptedServer struct {
+	ln     net.Listener
+	body   string
+	script []int
+	conns  atomic.Int32
+	reqs   atomic.Int32
+}
+
+func newScriptedServer(t *testing.T, body string, script ...int) *scriptedServer {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() unexpected error: %v", err)
+	}
+
+	s := &scriptedServer{ln: ln, body: body, script: script}
+
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			s.conns.Add(1)
+
+			go s.serve(conn)
+		}
+	}()
+
+	return s
+}
+
+func (s *scriptedServer) url() string {
+	return "http://" + s.ln.Addr().String() + "/"
+}
+
+func (s *scriptedServer) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	br := bufio.NewReader(conn)
+
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+
+		n := int(s.reqs.Add(1)) - 1
+
+		action := srvRespond
+		if n < len(s.script) {
+			action = s.script[n]
+		}
+
+		switch action {
+		case srvDrop:
+			return
+		case srvPartial:
+			_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+			return
+		case srvReject:
+			const msg = `{"message":"rejected"}`
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(msg), msg)
+		default:
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(s.body), s.body)
+		}
+	}
+}
+
+func TestClient_BulkLookup_staleConnectionRetry(t *testing.T) {
+	ips := []string{"1.1.1.1", "8.8.8.8"}
+
+	tests := []struct {
+		name      string
+		script    []int
+		wantErr   string // substring of the second call's error, empty for success
+		wantReqs  int32
+		wantConns int32
+	}{
+		{
+			// The pooled connection dies after the request was written and
+			// before any response byte: the POST is replayed once, on a
+			// fresh connection.
+			name:      "reused_connection_dropped_is_retried_once",
+			script:    []int{srvRespond, srvDrop, srvRespond},
+			wantReqs:  3,
+			wantConns: 2,
+		},
+		{
+			// The replay fails as well, on a connection that was not reused:
+			// no further attempt is made.
+			name:      "retry_happens_at_most_once",
+			script:    []int{srvRespond, srvDrop, srvDrop},
+			wantErr:   `http request to "` + "http://",
+			wantReqs:  3,
+			wantConns: 2,
+		},
+		{
+			// A response that started to arrive is never replayed.
+			name:      "no_retry_after_response_bytes",
+			script:    []int{srvRespond, srvPartial},
+			wantErr:   `http request to "` + "http://",
+			wantReqs:  2,
+			wantConns: 1,
+		},
+		{
+			// An HTTP error status is never replayed.
+			name:      "no_retry_on_http_status",
+			script:    []int{srvRespond, srvReject},
+			wantErr:   "rejected",
+			wantReqs:  2,
+			wantConns: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newScriptedServer(t, testBulkJSONValid, tt.script...)
+
+			client := &Client{c: newHTTPClient(), e: srv.url(), k: "testAPIkey"}
+			defer client.CloseIdleConnections()
+
+			// the first call leaves one kept-alive connection in the pool
+			if _, err := client.BulkLookup(ips); err != nil {
+				t.Fatalf("first BulkLookup() unexpected error: %v", err)
+			}
+
+			got, err := client.BulkLookup(ips)
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("second BulkLookup() unexpected error: %v", err)
+				}
+
+				if len(got) != 2 || got[0] == nil || got[0].IP != "1.1.1.1" || got[1] == nil || got[1].IP != "8.8.8.8" {
+					t.Fatalf("second BulkLookup() = %v, want the two canned results", got)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("second BulkLookup(): error expected but was nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("second BulkLookup() error = %q, should contain %q", err, tt.wantErr)
+				}
+			}
+
+			if n := srv.reqs.Load(); n != tt.wantReqs {
+				t.Errorf("server received %d requests, want %d", n, tt.wantReqs)
+			}
+
+			if n := srv.conns.Load(); n != tt.wantConns {
+				t.Errorf("server accepted %d connections, want %d", n, tt.wantConns)
+			}
+		})
+	}
+}
+
+func TestClient_BulkLookup_freshConnectionNotRetried(t *testing.T) {
+	ips := []string{"1.1.1.1", "8.8.8.8"}
+
+	// the very first connection is dropped: a failure on a connection that was
+	// never used before is not retried
+	srv := newScriptedServer(t, testBulkJSONValid, srvDrop, srvRespond)
+
+	client := &Client{c: newHTTPClient(), e: srv.url(), k: "testAPIkey"}
+	defer client.CloseIdleConnections()
+
+	if _, err := client.BulkLookup(ips); err == nil {
+		t.Fatal("first BulkLookup(): error expected but was nil")
+	}
+
+	if n := srv.reqs.Load(); n != 1 {
+		t.Fatalf("server received %d requests after the failed call, want 1", n)
+	}
+
+	// the client is still usable afterwards
+	got, err := client.BulkLookup(ips)
+	if err != nil {
+		t.Fatalf("second BulkLookup() unexpected error: %v", err)
+	}
+
+	if len(got) != 2 || got[0] == nil || got[0].IP != "1.1.1.1" {
+		t.Fatalf("second BulkLookup() = %v, want the two canned results", got)
+	}
+
+	if n := srv.conns.Load(); n != 2 {
+		t.Fatalf("server accepted %d connections, want 2", n)
+	}
+}
+
+// Fixtures for the is_satellite, is_anycast and dated blocklist additions.
+// testJSONAnycast also carries a key the package does not model
+// (region_type), which encoding/json has to ignore.
+
+// testJSONSatellite is a lookup of a satellite ISP address (excerpt).
+const testJSONSatellite = `{
+  "ip": "98.97.34.0",
+  "is_satellite": true,
+  "is_eu": false,
+  "city": "Seattle",
+  "country_code": "US",
+  "asn": { "asn": "AS14593", "name": "Space Exploration Technologies Corporation", "domain": "spacex.com", "route": "98.97.32.0/21", "type": "business" },
+  "threat": { "is_tor": false, "is_vpn": false, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": false, "is_anonymous": false, "is_known_attacker": false, "is_known_abuser": false, "is_threat": false, "is_bogon": false, "blocklists": [], "scores": { "vpn_score": 0, "proxy_score": 1, "threat_score": 8, "trust_score": 97 } },
+  "count": "0"
+}`
+
+// testJSONAnycast is a complete lookup of an anycast address whose blocklist
+// entries carry first_seen, last_seen and days_seen.
+const testJSONAnycast = `{
+  "ip": "8.8.8.8",
+  "is_anycast": true,
+  "is_eu": false,
+  "city": null,
+  "region": null,
+  "region_code": null,
+  "region_type": null,
+  "country_name": "United States",
+  "country_code": "US",
+  "continent_name": "North America",
+  "continent_code": "NA",
+  "latitude": 39.7599983215332,
+  "longitude": -98.5,
+  "postal": null,
+  "calling_code": "1",
+  "flag": "https://ipdata.co/flags/us.png",
+  "emoji_flag": "🇺🇸",
+  "emoji_unicode": "U+1F1FA U+1F1F8",
+  "asn": { "asn": "AS15169", "name": "Google LLC", "domain": "about.google", "route": "8.8.8.0/24", "type": "hosting" },
+  "company": { "name": "Google LLC", "domain": "about.google", "network": "8.8.8.0/24", "type": "hosting" },
+  "languages": [ { "name": "English", "native": "English", "code": "en" } ],
+  "currency": { "name": "US Dollar", "code": "USD", "symbol": "$", "native": "$", "plural": "US dollars" },
+  "time_zone": { "name": null, "abbr": null, "offset": null, "is_dst": null, "current_time": null },
+  "threat": {
+    "is_tor": false, "is_vpn": false, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": true,
+    "is_anonymous": false, "is_known_attacker": false, "is_known_abuser": false, "is_threat": false, "is_bogon": false,
+    "blocklists": [
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "cloud" },
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "open_resolvers" }
+    ],
+    "scores": { "vpn_score": 100, "proxy_score": 93, "threat_score": 100, "trust_score": 2 }
+  },
+  "count": "0"
+}`
+
+// testJSONVPNExit is a lookup of a VPN exit (excerpt): neither top-level flag
+// is present, and the third blocklist entry has no dates.
+const testJSONVPNExit = `{
+  "ip": "187.13.250.1",
+  "is_eu": false,
+  "threat": {
+    "is_tor": false, "is_vpn": true, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": true,
+    "is_anonymous": true, "is_known_attacker": true, "is_known_abuser": true, "is_threat": true, "is_bogon": false,
+    "blocklists": [
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "Gluetun", "site": "https://github.com/qdm12/gluetun", "type": "vpn" },
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "cloud" },
+      { "name": "ipdata", "site": "https://ipdata.co", "type": "vpn" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "NordVPN", "site": "https://nordvpn.com", "type": "vpn" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "Wikimedia Global Blocklist", "site": "https://wikimedia.org", "type": "general" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "X4BNet", "site": "https://github.com/X4BNet/lists_vpn", "type": "vpn" }
+    ],
+    "scores": { "vpn_score": 100, "proxy_score": 99, "threat_score": 100, "trust_score": 0 }
+  },
+  "count": "0"
+}`
+
+// testBulkJSONNewFields is a bulk response carrying the three fixtures above.
+const testBulkJSONNewFields = "[" + testJSONSatellite + "," + testJSONAnycast + "," + testJSONVPNExit + "]"
+
+// typed values of the three fixtures; keys the API left out read false, empty
+// or nil
+var (
+	testIPSatellite = IP{
+		IP: "98.97.34.0",
+		ASN: ASN{
+			ASN:    "AS14593",
+			Name:   "Space Exploration Technologies Corporation",
+			Domain: "spacex.com",
+			Route:  "98.97.32.0/21",
+			Type:   "business",
+		},
+		City:        "Seattle",
+		CountryCode: "US",
+		IsSatellite: true,
+		Threat: &Threat{
+			Blocklists: []Blocklist{},
+			Scores:     Scores{VPNScore: 0, ProxyScore: 1, ThreatScore: 8, TrustScore: 97},
+		},
+		Count: "0",
+	}
+
+	testIPAnycast = IP{
+		IP: "8.8.8.8",
+		ASN: ASN{
+			ASN:    "AS15169",
+			Name:   "Google LLC",
+			Domain: "about.google",
+			Route:  "8.8.8.0/24",
+			Type:   "hosting",
+		},
+		CountryName:   "United States",
+		CountryCode:   "US",
+		Flag:          "https://ipdata.co/flags/us.png",
+		EmojiFlag:     "\U0001F1FA\U0001F1F8",
+		EmojiUnicode:  "U+1F1FA U+1F1F8",
+		ContinentName: "North America",
+		ContinentCode: "NA",
+		Latitude:      39.7599983215332,
+		Longitude:     -98.5,
+		CallingCode:   "1",
+		IsAnycast:     true,
+		Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
+		Currency: &Currency{
+			Name:   "US Dollar",
+			Code:   "USD",
+			Symbol: "$",
+			Native: "$",
+			Plural: "US dollars",
+		},
+		Company: &Company{
+			Name:    "Google LLC",
+			Domain:  "about.google",
+			Network: "8.8.8.0/24",
+			Type:    "hosting",
+		},
+		TimeZone: &TimeZone{},
+		Threat: &Threat{
+			IsDatacenter: true,
+			Blocklists: []Blocklist{
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "cloud", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "open_resolvers", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+			},
+			Scores: Scores{VPNScore: 100, ProxyScore: 93, ThreatScore: 100, TrustScore: 2},
+		},
+		Count: "0",
+	}
+
+	testIPVPNExit = IP{
+		IP: "187.13.250.1",
+		Threat: &Threat{
+			IsVPN:           true,
+			IsDatacenter:    true,
+			IsAnonymous:     true,
+			IsKnownAttacker: true,
+			IsKnownAbuser:   true,
+			IsThreat:        true,
+			Blocklists: []Blocklist{
+				{Name: "Gluetun", Site: "https://github.com/qdm12/gluetun", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "cloud", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "vpn"},
+				{Name: "NordVPN", Site: "https://nordvpn.com", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "Wikimedia Global Blocklist", Site: "https://wikimedia.org", Type: "general", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "X4BNet", Site: "https://github.com/X4BNet/lists_vpn", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+			},
+			Scores: Scores{VPNScore: 100, ProxyScore: 99, ThreatScore: 100, TrustScore: 0},
+		},
+		Count: "0",
+	}
+)
+
+func Test_decodeIP_newFields(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want IP
+	}{
+		{name: "satellite_isp", json: testJSONSatellite, want: testIPSatellite},
+		{name: "anycast_with_dated_blocklists", json: testJSONAnycast, want: testIPAnycast},
+		{name: "vpn_exit_entry_without_dates", json: testJSONVPNExit, want: testIPVPNExit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeIP(strings.NewReader(tt.json))
+			if err != nil {
+				t.Fatalf("decodeIP() unexpected error: %v", err)
+			}
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("IP differs: (-want +got)\n%s", diff)
+			}
+		})
+	}
+}
+
+func Test_client_Lookup_newFields(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/98.97.34.0", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONSatellite)
+	}))
+
+	mux.HandleFunc("/8.8.8.8", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONAnycast)
+	}))
+
+	mux.HandleFunc("/187.13.250.1", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONVPNExit)
+	}))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := Client{c: newHTTPClient(), e: server.URL + "/", k: "testAPIkey"}
+
+	tests := []struct {
+		name string
+		ip   string
+		want IP
+	}{
+		{name: "satellite_isp", ip: "98.97.34.0", want: testIPSatellite},
+		{name: "anycast_with_dated_blocklists", ip: "8.8.8.8", want: testIPAnycast},
+		{name: "vpn_exit_entry_without_dates", ip: "187.13.250.1", want: testIPVPNExit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.Lookup(tt.ip)
+			if err != nil {
+				t.Fatalf("Lookup(%q) unexpected error: %v", tt.ip, err)
+			}
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("Lookup(%q) differs: (-want +got)\n%s", tt.ip, diff)
+			}
+		})
+	}
+}
+
+func TestClient_BulkLookup_newFields(t *testing.T) {
+	server := testBulkHTTPServer()
+	defer server.Close()
+
+	client := &Client{c: newHTTPClient(), e: server.URL + "/", k: "testAPIkey"}
+
+	got, err := client.BulkLookup([]string{"98.97.34.0", "8.8.8.8", "187.13.250.1"})
+	if err != nil {
+		t.Fatalf("BulkLookup() unexpected error: %v", err)
+	}
+
+	want := []*IP{&testIPSatellite, &testIPAnycast, &testIPVPNExit}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("IP slice differs: (-want +got)\n%s", diff)
+	}
+}
