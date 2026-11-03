@@ -58,3 +58,51 @@ jobs:
 
       - name: Run staticcheck
         run: staticcheck ./...
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [test, staticcheck]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      created: ${{ steps.release.outputs.created }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and release the version in client.go
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -nE 's/.*Version *= *"([^"]+)".*/\1/p' client.go | head -1)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Version not found in client.go"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          STATUS=0
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null || STATUS=$?
+          case "$STATUS" in
+            0)
+              echo "Tag $TAG already exists; nothing to release."
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+              echo "Created tag and release $TAG at $GITHUB_SHA."
+              echo "created=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::git ls-remote failed with exit status $STATUS"
+              exit "$STATUS"
+              ;;
+          esac
