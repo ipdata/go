@@ -5,6 +5,7 @@
 package ipdata
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -42,6 +43,8 @@ func Test_bulkToIP(t *testing.T) {
 		Longitude:     -122.4842,
 		CallingCode:   "1",
 		IsEU:          true,
+		IsSatellite:   true,
+		IsAnycast:     true,
 		Languages:     []Language{{Name: "English (US)", Native: "en-us", Code: "en"}},
 		Currency: &Currency{
 			Name:   "US Dollar",
@@ -76,6 +79,10 @@ func Test_bulkToIP(t *testing.T) {
 			IsKnownAbuser:   false,
 			IsThreat:        true,
 			IsBogon:         false,
+			Blocklists: []Blocklist{
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "vpn"},
+				{Name: "NordVPN", Site: "https://nordvpn.com", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+			},
 		},
 		Count: "1234",
 	}
@@ -104,6 +111,8 @@ func Test_bulkToIP(t *testing.T) {
 		Longitude:     -122.4842,
 		CallingCode:   "1",
 		IsEU:          true,
+		IsSatellite:   true,
+		IsAnycast:     true,
 		Languages:     []Language{{Name: "English (US)", Native: "en-us", Code: "en"}},
 		Currency: &Currency{
 			Name:   "US Dollar",
@@ -138,6 +147,10 @@ func Test_bulkToIP(t *testing.T) {
 			IsKnownAbuser:   false,
 			IsThreat:        true,
 			IsBogon:         false,
+			Blocklists: []Blocklist{
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "vpn"},
+				{Name: "NordVPN", Site: "https://nordvpn.com", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+			},
 		},
 		Count: "1234",
 	}
@@ -145,5 +158,51 @@ func Test_bulkToIP(t *testing.T) {
 	got := bulkToIP(bip)
 	if diff := cmp.Diff(ip, got); diff != "" {
 		t.Fatalf("IP differs: (-want +got)\n%s", diff)
+	}
+}
+
+// intPtr returns a pointer to i, for the optional integer fields of fixtures.
+func intPtr(i int) *int {
+	return &i
+}
+
+func Test_Blocklist_marshalOptionalFields(t *testing.T) {
+	// the fields a feed did not report are left out when encoding, mirroring
+	// the API response
+	tests := []struct {
+		name string
+		in   Blocklist
+		want string
+	}{
+		{
+			name: "without_dates",
+			in:   Blocklist{Name: "ipdata", Site: "https://ipdata.co", Type: "vpn"},
+			want: `{"name":"ipdata","site":"https://ipdata.co","type":"vpn"}`,
+		},
+		{
+			name: "with_dates",
+			in: Blocklist{
+				Name:      "NordVPN",
+				Site:      "https://nordvpn.com",
+				Type:      "vpn",
+				FirstSeen: "2026-10-31",
+				LastSeen:  "2026-11-02",
+				DaysSeen:  intPtr(2),
+			},
+			want: `{"name":"NordVPN","site":"https://nordvpn.com","type":"vpn","first_seen":"2026-10-31","last_seen":"2026-11-02","days_seen":2}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(tt.in)
+			if err != nil {
+				t.Fatalf("json.Marshal() unexpected error: %v", err)
+			}
+
+			if string(got) != tt.want {
+				t.Fatalf("json.Marshal() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

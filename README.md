@@ -186,6 +186,8 @@ The `IP` struct includes all fields from the ipdata API response:
 | `EmojiFlag` | `string` | Flag emoji character |
 | `EmojiUnicode` | `string` | Unicode representation |
 | `IsEU` | `bool` | Whether in the EU |
+| `IsSatellite` | `bool` | Whether the address belongs to a satellite ISP; the API sends `is_satellite` only when true, so it reads false otherwise |
+| `IsAnycast` | `bool` | Whether the address is an anycast address; the API sends `is_anycast` only when true, so it reads false otherwise |
 | `Organization` | `string` | Organization name |
 | `ASN` | `ASN` | Autonomous System Number data |
 | `Company` | `*Company` | Company/organization data |
@@ -212,6 +214,12 @@ The `IP` struct includes all fields from the ipdata API response:
 **`TimeZone`**: `Name`, `Abbreviation`, `Offset`, `IsDST`, `CurrentTime`
 
 **`Threat`**: `IsTOR`, `IsVPN`, `IsICloudRelay`, `IsProxy`, `IsDatacenter`, `IsAnonymous`, `IsKnownAttacker`, `IsKnownAbuser`, `IsThreat`, `IsBogon`, `Blocklists`, `Scores`
+
+**`Blocklist`** (one entry of `Threat.Blocklists`): `Name`, `Site`, `Type`, plus three optional fields that some feeds (for example ipdata's own vpn feed) do not report:
+
+- `FirstSeen` (`string`): first day the address was listed, as `YYYY-MM-DD` (UTC); empty when not reported
+- `LastSeen` (`string`): last day the address was listed, as `YYYY-MM-DD` (UTC); empty when not reported
+- `DaysSeen` (`*int`): number of days the address was listed; `nil` when not reported
 
 ## Contributors
 

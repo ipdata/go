@@ -115,6 +115,11 @@ func testBulkHTTPServer() *httptest.Server {
 			fmt.Fprintf(w, `ip slice wrong inputs, want ["1.1.1.1","8.8.8.8"] got: %#v`, ips)
 			return
 		case 3:
+			if ips[0] == "98.97.34.0" && ips[1] == "8.8.8.8" && ips[2] == "187.13.250.1" {
+				fmt.Fprint(w, testBulkJSONNewFields)
+				return
+			}
+
 			if ips[0] == "1.1.1.1" && ips[1] == "8.8.8.8" && ips[2] == "127.0.0.1" {
 				fmt.Fprint(w, testBulkJSONWithLocalhost)
 				return
@@ -2361,5 +2366,261 @@ func TestClient_BulkLookup_freshConnectionNotRetried(t *testing.T) {
 
 	if n := srv.conns.Load(); n != 2 {
 		t.Fatalf("server accepted %d connections, want 2", n)
+	}
+}
+
+// Fixtures for the is_satellite, is_anycast and dated blocklist additions.
+// testJSONAnycast also carries a key the package does not model
+// (region_type), which encoding/json has to ignore.
+
+// testJSONSatellite is a lookup of a satellite ISP address (excerpt).
+const testJSONSatellite = `{
+  "ip": "98.97.34.0",
+  "is_satellite": true,
+  "is_eu": false,
+  "city": "Seattle",
+  "country_code": "US",
+  "asn": { "asn": "AS14593", "name": "Space Exploration Technologies Corporation", "domain": "spacex.com", "route": "98.97.32.0/21", "type": "business" },
+  "threat": { "is_tor": false, "is_vpn": false, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": false, "is_anonymous": false, "is_known_attacker": false, "is_known_abuser": false, "is_threat": false, "is_bogon": false, "blocklists": [], "scores": { "vpn_score": 0, "proxy_score": 1, "threat_score": 8, "trust_score": 97 } },
+  "count": "0"
+}`
+
+// testJSONAnycast is a complete lookup of an anycast address whose blocklist
+// entries carry first_seen, last_seen and days_seen.
+const testJSONAnycast = `{
+  "ip": "8.8.8.8",
+  "is_anycast": true,
+  "is_eu": false,
+  "city": null,
+  "region": null,
+  "region_code": null,
+  "region_type": null,
+  "country_name": "United States",
+  "country_code": "US",
+  "continent_name": "North America",
+  "continent_code": "NA",
+  "latitude": 39.7599983215332,
+  "longitude": -98.5,
+  "postal": null,
+  "calling_code": "1",
+  "flag": "https://ipdata.co/flags/us.png",
+  "emoji_flag": "🇺🇸",
+  "emoji_unicode": "U+1F1FA U+1F1F8",
+  "asn": { "asn": "AS15169", "name": "Google LLC", "domain": "about.google", "route": "8.8.8.0/24", "type": "hosting" },
+  "company": { "name": "Google LLC", "domain": "about.google", "network": "8.8.8.0/24", "type": "hosting" },
+  "languages": [ { "name": "English", "native": "English", "code": "en" } ],
+  "currency": { "name": "US Dollar", "code": "USD", "symbol": "$", "native": "$", "plural": "US dollars" },
+  "time_zone": { "name": null, "abbr": null, "offset": null, "is_dst": null, "current_time": null },
+  "threat": {
+    "is_tor": false, "is_vpn": false, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": true,
+    "is_anonymous": false, "is_known_attacker": false, "is_known_abuser": false, "is_threat": false, "is_bogon": false,
+    "blocklists": [
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "cloud" },
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "open_resolvers" }
+    ],
+    "scores": { "vpn_score": 100, "proxy_score": 93, "threat_score": 100, "trust_score": 2 }
+  },
+  "count": "0"
+}`
+
+// testJSONVPNExit is a lookup of a VPN exit (excerpt): neither top-level flag
+// is present, and the third blocklist entry has no dates.
+const testJSONVPNExit = `{
+  "ip": "187.13.250.1",
+  "is_eu": false,
+  "threat": {
+    "is_tor": false, "is_vpn": true, "is_icloud_relay": false, "is_proxy": false, "is_datacenter": true,
+    "is_anonymous": true, "is_known_attacker": true, "is_known_abuser": true, "is_threat": true, "is_bogon": false,
+    "blocklists": [
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "Gluetun", "site": "https://github.com/qdm12/gluetun", "type": "vpn" },
+      { "days_seen": 1, "first_seen": "2026-11-02", "last_seen": "2026-11-02", "name": "ipdata", "site": "https://ipdata.co", "type": "cloud" },
+      { "name": "ipdata", "site": "https://ipdata.co", "type": "vpn" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "NordVPN", "site": "https://nordvpn.com", "type": "vpn" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "Wikimedia Global Blocklist", "site": "https://wikimedia.org", "type": "general" },
+      { "days_seen": 2, "first_seen": "2026-10-31", "last_seen": "2026-11-02", "name": "X4BNet", "site": "https://github.com/X4BNet/lists_vpn", "type": "vpn" }
+    ],
+    "scores": { "vpn_score": 100, "proxy_score": 99, "threat_score": 100, "trust_score": 0 }
+  },
+  "count": "0"
+}`
+
+// testBulkJSONNewFields is a bulk response carrying the three fixtures above.
+const testBulkJSONNewFields = "[" + testJSONSatellite + "," + testJSONAnycast + "," + testJSONVPNExit + "]"
+
+// typed values of the three fixtures; keys the API left out read false, empty
+// or nil
+var (
+	testIPSatellite = IP{
+		IP: "98.97.34.0",
+		ASN: ASN{
+			ASN:    "AS14593",
+			Name:   "Space Exploration Technologies Corporation",
+			Domain: "spacex.com",
+			Route:  "98.97.32.0/21",
+			Type:   "business",
+		},
+		City:        "Seattle",
+		CountryCode: "US",
+		IsSatellite: true,
+		Threat: &Threat{
+			Blocklists: []Blocklist{},
+			Scores:     Scores{VPNScore: 0, ProxyScore: 1, ThreatScore: 8, TrustScore: 97},
+		},
+		Count: "0",
+	}
+
+	testIPAnycast = IP{
+		IP: "8.8.8.8",
+		ASN: ASN{
+			ASN:    "AS15169",
+			Name:   "Google LLC",
+			Domain: "about.google",
+			Route:  "8.8.8.0/24",
+			Type:   "hosting",
+		},
+		CountryName:   "United States",
+		CountryCode:   "US",
+		Flag:          "https://ipdata.co/flags/us.png",
+		EmojiFlag:     "\U0001F1FA\U0001F1F8",
+		EmojiUnicode:  "U+1F1FA U+1F1F8",
+		ContinentName: "North America",
+		ContinentCode: "NA",
+		Latitude:      39.7599983215332,
+		Longitude:     -98.5,
+		CallingCode:   "1",
+		IsAnycast:     true,
+		Languages:     []Language{{Name: "English", Native: "English", Code: "en"}},
+		Currency: &Currency{
+			Name:   "US Dollar",
+			Code:   "USD",
+			Symbol: "$",
+			Native: "$",
+			Plural: "US dollars",
+		},
+		Company: &Company{
+			Name:    "Google LLC",
+			Domain:  "about.google",
+			Network: "8.8.8.0/24",
+			Type:    "hosting",
+		},
+		TimeZone: &TimeZone{},
+		Threat: &Threat{
+			IsDatacenter: true,
+			Blocklists: []Blocklist{
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "cloud", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "open_resolvers", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+			},
+			Scores: Scores{VPNScore: 100, ProxyScore: 93, ThreatScore: 100, TrustScore: 2},
+		},
+		Count: "0",
+	}
+
+	testIPVPNExit = IP{
+		IP: "187.13.250.1",
+		Threat: &Threat{
+			IsVPN:           true,
+			IsDatacenter:    true,
+			IsAnonymous:     true,
+			IsKnownAttacker: true,
+			IsKnownAbuser:   true,
+			IsThreat:        true,
+			Blocklists: []Blocklist{
+				{Name: "Gluetun", Site: "https://github.com/qdm12/gluetun", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "cloud", FirstSeen: "2026-11-02", LastSeen: "2026-11-02", DaysSeen: intPtr(1)},
+				{Name: "ipdata", Site: "https://ipdata.co", Type: "vpn"},
+				{Name: "NordVPN", Site: "https://nordvpn.com", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "Wikimedia Global Blocklist", Site: "https://wikimedia.org", Type: "general", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+				{Name: "X4BNet", Site: "https://github.com/X4BNet/lists_vpn", Type: "vpn", FirstSeen: "2026-10-31", LastSeen: "2026-11-02", DaysSeen: intPtr(2)},
+			},
+			Scores: Scores{VPNScore: 100, ProxyScore: 99, ThreatScore: 100, TrustScore: 0},
+		},
+		Count: "0",
+	}
+)
+
+func Test_decodeIP_newFields(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want IP
+	}{
+		{name: "satellite_isp", json: testJSONSatellite, want: testIPSatellite},
+		{name: "anycast_with_dated_blocklists", json: testJSONAnycast, want: testIPAnycast},
+		{name: "vpn_exit_entry_without_dates", json: testJSONVPNExit, want: testIPVPNExit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeIP(strings.NewReader(tt.json))
+			if err != nil {
+				t.Fatalf("decodeIP() unexpected error: %v", err)
+			}
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("IP differs: (-want +got)\n%s", diff)
+			}
+		})
+	}
+}
+
+func Test_client_Lookup_newFields(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/98.97.34.0", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONSatellite)
+	}))
+
+	mux.HandleFunc("/8.8.8.8", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONAnycast)
+	}))
+
+	mux.HandleFunc("/187.13.250.1", testAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONVPNExit)
+	}))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := Client{c: newHTTPClient(), e: server.URL + "/", k: "testAPIkey"}
+
+	tests := []struct {
+		name string
+		ip   string
+		want IP
+	}{
+		{name: "satellite_isp", ip: "98.97.34.0", want: testIPSatellite},
+		{name: "anycast_with_dated_blocklists", ip: "8.8.8.8", want: testIPAnycast},
+		{name: "vpn_exit_entry_without_dates", ip: "187.13.250.1", want: testIPVPNExit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.Lookup(tt.ip)
+			if err != nil {
+				t.Fatalf("Lookup(%q) unexpected error: %v", tt.ip, err)
+			}
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("Lookup(%q) differs: (-want +got)\n%s", tt.ip, diff)
+			}
+		})
+	}
+}
+
+func TestClient_BulkLookup_newFields(t *testing.T) {
+	server := testBulkHTTPServer()
+	defer server.Close()
+
+	client := &Client{c: newHTTPClient(), e: server.URL + "/", k: "testAPIkey"}
+
+	got, err := client.BulkLookup([]string{"98.97.34.0", "8.8.8.8", "187.13.250.1"})
+	if err != nil {
+		t.Fatalf("BulkLookup() unexpected error: %v", err)
+	}
+
+	want := []*IP{&testIPSatellite, &testIPAnycast, &testIPVPNExit}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("IP slice differs: (-want +got)\n%s", diff)
 	}
 }
