@@ -29,9 +29,10 @@ const Version = "0.8.2"
 const fqpn = "github.com/ipdata/go"
 
 const (
-	apiEndpoint   = "https://api.ipdata.co/"
-	euAPIEndpoint = "https://eu-api.ipdata.co/"
-	apiAuthParam  = "api-key"
+	apiEndpoint    = "https://api.ipdata.co/"
+	euAPIEndpoint  = "https://eu-api.ipdata.co/"
+	apiAuthParam   = "api-key"
+	apiFieldsParam = "fields"
 )
 
 var userAgent = fmt.Sprintf(
@@ -53,6 +54,27 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
+// WithTimeout sets a time limit for every request made through the Client, by
+// setting Timeout on the *http.Client it uses. The limit covers the whole
+// request, from dialling the connection to the end of reading the response
+// body, including the body of a response returned by RawLookup or
+// RawBulkLookup. Without this option no overall limit is set and a request is
+// bounded only by the context passed to the WithContext methods; a context
+// deadline and the time limit combine, and the earlier one wins. A request
+// that exceeds the limit fails with an error whose Timeout method reports
+// true, and a bulk lookup is never replayed after a timeout.
+//
+// The limit is applied once all options have been processed, so it also
+// covers an *http.Client supplied with WithHTTPClient, whatever the order of
+// the options: the Client then uses a copy of that *http.Client with Timeout
+// set, and the caller's value is left untouched. A zero d means no limit.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		c.timeout = d
+		c.hasTimeout = true
+	}
+}
+
 // Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
 //
@@ -67,26 +89,17 @@ type Client struct {
 	c *http.Client // http client
 	e string       // api endpoint
 	k string       // api key
+
+	// timeout is the request time limit given to WithTimeout, and hasTimeout
+	// records that the option was used at all; newClient applies it to c.
+	timeout    time.Duration
+	hasTimeout bool
 }
 
 // NewClient takes an API key and optional Options, and returns a Client that
 // uses the default endpoint (https://api.ipdata.co/).
 func NewClient(apiKey string, opts ...Option) (Client, error) {
-	if len(apiKey) == 0 {
-		return Client{}, errAPIKey
-	}
-
-	c := Client{
-		c: newHTTPClient(),
-		e: apiEndpoint,
-		k: apiKey,
-	}
-
-	for _, opt := range opts {
-		opt(&c)
-	}
-
-	return c, nil
+	return newClient(apiEndpoint, apiKey, opts)
 }
 
 // NewEUClient takes an API key and optional Options, and returns a Client that
@@ -94,18 +107,32 @@ func NewClient(apiKey string, opts ...Option) (Client, error) {
 // requests are routed through EU data centers only (Frankfurt, Paris, Ireland),
 // which can be useful for GDPR compliance.
 func NewEUClient(apiKey string, opts ...Option) (Client, error) {
+	return newClient(euAPIEndpoint, apiKey, opts)
+}
+
+// newClient builds a Client for endpoint, applies the options and then the
+// request time limit set with WithTimeout, if any.
+func newClient(endpoint, apiKey string, opts []Option) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
 	}
 
 	c := Client{
 		c: newHTTPClient(),
-		e: euAPIEndpoint,
+		e: endpoint,
 		k: apiKey,
 	}
 
 	for _, opt := range opts {
 		opt(&c)
+	}
+
+	if c.hasTimeout && c.c != nil {
+		// work on a copy: an *http.Client supplied through WithHTTPClient
+		// may be shared with other users
+		hc := *c.c
+		hc.Timeout = c.timeout
+		c.c = &hc
 	}
 
 	return c, nil
@@ -140,8 +167,16 @@ func (c Client) RawLookup(ip string) (*http.Response, error) {
 
 // RawLookupWithContext is a RawLookup that uses a provided context.Context.
 func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Response, error) {
+	return c.rawLookup(ctx, ip, nil)
+}
+
+// rawLookup sends the GET request for ip, with params (which may be nil) and
+// the API key as the query string, and returns the response when its status is
+// 200 OK. Any other status becomes an error, of type Error when the body holds
+// the API's JSON message, and the response body is closed.
+func (c Client) rawLookup(ctx context.Context, ip string, params url.Values) (*http.Response, error) {
 	// build request
-	req, err := newGetRequestWithContext(ctx, c.e+ip, c.k)
+	req, err := newGetRequestWithContext(ctx, c.e+ip, c.k, params)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error building request to look up %s", ip)
 	}
@@ -163,7 +198,7 @@ func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Resp
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
 		}
 
 		var a apiErr
@@ -192,7 +227,7 @@ func decodeIP(r io.Reader) (IP, error) {
 }
 
 // Lookup takes an IP address to look up the details for. An empty string means
-// you want the information about the current node's pubilc IP address. If an
+// you want the information about the current node's public IP address. If an
 // API error occurs, the error value will be of type Error.
 func (c Client) Lookup(ip string) (IP, error) {
 	return c.LookupWithContext(context.Background(), ip)
@@ -200,7 +235,29 @@ func (c Client) Lookup(ip string) (IP, error) {
 
 // LookupWithContext is a Lookup that uses a provided context.Context.
 func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
-	resp, err := c.RawLookupWithContext(ctx, ip)
+	return c.lookup(ctx, ip, nil)
+}
+
+// LookupFields takes an IP address and a list of fields to return. Only the
+// specified fields will be populated in the response. If an API error occurs,
+// the error value will be of type Error.
+func (c Client) LookupFields(ip string, fields []string) (IP, error) {
+	return c.LookupFieldsWithContext(context.Background(), ip, fields)
+}
+
+// LookupFieldsWithContext is a LookupFields that uses a provided context.Context.
+func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields []string) (IP, error) {
+	var params url.Values
+	if len(fields) > 0 {
+		params = url.Values{apiFieldsParam: []string{strings.Join(fields, ",")}}
+	}
+
+	return c.lookup(ctx, ip, params)
+}
+
+// lookup performs rawLookup and decodes the body of the 200 OK response.
+func (c Client) lookup(ctx context.Context, ip string, params url.Values) (IP, error) {
+	resp, err := c.rawLookup(ctx, ip, params)
 	if err != nil {
 		return IP{}, err
 	}
@@ -218,57 +275,10 @@ func (c Client) LookupWithContext(ctx context.Context, ip string) (IP, error) {
 	return pip, nil
 }
 
-// LookupFields takes an IP address and a list of fields to return. Only the
-// specified fields will be populated in the response. If an API error occurs,
-// the error value will be of type Error.
-func (c Client) LookupFields(ip string, fields []string) (IP, error) {
-	return c.LookupFieldsWithContext(context.Background(), ip, fields)
-}
-
-// LookupFieldsWithContext is a LookupFields that uses a provided context.Context.
-func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields []string) (IP, error) {
-	reqURL := c.e + ip
-	if len(fields) > 0 {
-		reqURL += "?fields=" + strings.Join(fields, ",")
-	}
-
-	req, err := newGetRequestWithContext(ctx, reqURL, c.k)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "error building request to look up %s", ip)
-	}
-
-	resp, err := c.c.Do(req)
-	if err != nil {
-		return IP{}, errors.Wrapf(err, "http request to %q failed", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
-	}
-
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		pip, err := decodeIP(resp.Body)
-		if err != nil {
-			return IP{}, err
-		}
-		return pip, nil
-	default:
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
-		}
-
-		var a apiErr
-		if err := json.Unmarshal(body, &a); err != nil {
-			return IP{}, errors.Errorf("request for %q failed (unexpected response): %s: %v", ip, resp.Status, err)
-		}
-		return IP{}, newError(a.Message, resp.StatusCode)
-	}
-}
-
-func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http.Request, error) {
+// newGetRequestWithContext builds the GET request for urlStr. Its query string
+// is built from params plus the API key, which always takes precedence over a
+// value in params; params may be nil and is left unchanged.
+func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string, params url.Values) (*http.Request, error) {
 	if len(urlStr) == 0 {
 		return nil, errors.New("url cannot be an empty string")
 	}
@@ -285,7 +295,11 @@ func newGetRequestWithContext(ctx context.Context, urlStr, apiKey string) (*http
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
 
-	q := url.Values{apiAuthParam: []string{apiKey}}
+	q := make(url.Values, len(params)+1)
+	for name, values := range params {
+		q[name] = values
+	}
+	q.Set(apiAuthParam, apiKey)
 	req.URL.RawQuery = q.Encode()
 
 	return req, nil
@@ -315,7 +329,7 @@ func (c *Client) RawBulkLookupWithContext(ctx context.Context, ips []string) (*h
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
 		}
 
 		var a apiErr
