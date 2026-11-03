@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -2622,5 +2623,76 @@ func TestClient_BulkLookup_newFields(t *testing.T) {
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("IP slice differs: (-want +got)\n%s", diff)
+	}
+}
+
+// TestClient_truncatedErrorResponse covers an error response whose body cannot
+// be read to the end: the server announces more bytes than it sends and then
+// closes the connection. The returned error names the status and carries the
+// read error exactly once.
+func TestClient_truncatedErrorResponse(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":`)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/8.8.8.8", handler)
+	mux.HandleFunc("/bulk", handler)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := Client{c: newHTTPClient(), e: server.URL + "/", k: "testAPIkey"}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Lookup",
+			call: func() error {
+				_, err := c.Lookup("8.8.8.8")
+				return err
+			},
+		},
+		{
+			name: "RawLookup",
+			call: func() error {
+				_, err := c.RawLookup("8.8.8.8")
+				return err
+			},
+		},
+		{
+			name: "BulkLookup",
+			call: func() error {
+				_, err := c.BulkLookup([]string{"1.1.1.1", "8.8.8.8"})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatalf("%s() returned no error, want a body read error", tt.name)
+			}
+
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("%s() error = %v, want it to wrap io.ErrUnexpectedEOF", tt.name, err)
+			}
+
+			msg := err.Error()
+
+			if prefix := `failed to read body from response with status code "500 Internal Server Error": `; !strings.HasPrefix(msg, prefix) {
+				t.Errorf("%s() error = %q, want prefix %q", tt.name, msg, prefix)
+			}
+
+			if n := strings.Count(msg, io.ErrUnexpectedEOF.Error()); n != 1 {
+				t.Errorf("%s() error = %q, mentions the read error %d times, want once", tt.name, msg, n)
+			}
+		})
 	}
 }

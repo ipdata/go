@@ -163,7 +163,7 @@ func (c Client) RawLookupWithContext(ctx context.Context, ip string) (*http.Resp
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
 		}
 
 		var a apiErr
@@ -257,7 +257,7 @@ func (c Client) LookupFieldsWithContext(ctx context.Context, ip string, fields [
 	default:
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+			return IP{}, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
 		}
 
 		var a apiErr
@@ -315,7 +315,7 @@ func (c *Client) RawBulkLookupWithContext(ctx context.Context, ips []string) (*h
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to read body from response with status code %q: %s", resp.Status, err)
+			return nil, errors.Wrapf(err, "failed to read body from response with status code %q", resp.Status)
 		}
 
 		var a apiErr
