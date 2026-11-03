@@ -108,6 +108,35 @@ setup off when an `http.Transport` sets a custom `DialContext` or
 `TLSClientConfig`, so set `ForceAttemptHTTP2: true` on such a transport (the
 default transport already does) to keep speaking HTTP/2 to api.ipdata.co.
 
+### Timeouts
+
+By default the client sets no overall time limit on a request: dialling and the
+TLS handshake are bounded (30 and 10 seconds), but waiting for the API's
+response and reading it are not. Bound a single call with a context, or give
+the client a limit for every request with `WithTimeout`; when both are set,
+the earlier deadline wins.
+
+```go
+client, err := ipdata.NewClient("YOUR_API_KEY", ipdata.WithTimeout(10*time.Second))
+if err != nil {
+	panic(err)
+}
+
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+data, err := client.LookupWithContext(ctx, "8.8.8.8")
+```
+
+The limit covers the whole request, from dialling to the end of reading the
+response body, so the body of a `RawLookup` response has to be read within it
+as well. A request that exceeds the limit fails with an error whose `Timeout()`
+method reports true, and bulk lookups are never replayed after a timeout.
+`WithTimeout` also applies to an `*http.Client` passed with `WithHTTPClient`, in
+whichever order the options are given: the client then uses a copy of it with
+`Timeout` set and leaves the caller's value untouched. `WithTimeout(0)` means
+no limit.
+
 ### EU Endpoint (GDPR Compliance)
 
 For GDPR compliance, use `NewEUClient` to route all requests through EU data

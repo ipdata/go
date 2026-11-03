@@ -26,5 +26,7 @@
 // server negotiates it) for as long as it lives, so build one Client and reuse
 // it for every lookup instead of creating one per request. A Client is safe
 // for concurrent use by multiple goroutines; call CloseIdleConnections at
-// shutdown to release the pooled connections.
+// shutdown to release the pooled connections. A request has no overall time
+// limit unless the Client was built with WithTimeout or a context with a
+// deadline is passed to the WithContext methods.
 package ipdata

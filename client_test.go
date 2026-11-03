@@ -2781,3 +2781,162 @@ func TestClient_truncatedErrorResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestNewClient_WithTimeout(t *testing.T) {
+	t.Run("default_http_client", func(t *testing.T) {
+		c, err := NewClient("testAPIkey", WithTimeout(5*time.Second))
+		if err != nil {
+			t.Fatalf("NewClient() unexpected error: %v", err)
+		}
+
+		if c.c == nil {
+			t.Fatal("c.c should not be nil")
+		}
+
+		if got, want := c.c.Timeout, 5*time.Second; got != want {
+			t.Fatalf("c.c.Timeout = %s, want %s", got, want)
+		}
+
+		if _, ok := c.c.Transport.(*http.Transport); !ok {
+			t.Fatalf("c.c.Transport is %T, want the *http.Transport of newHTTPClient()", c.c.Transport)
+		}
+	})
+
+	t.Run("custom_http_client", func(t *testing.T) {
+		rt := &http.Transport{}
+		custom := &http.Client{Transport: rt, Timeout: time.Minute}
+
+		tests := []struct {
+			name string
+			opts []Option
+		}{
+			{
+				name: "timeout_after_http_client",
+				opts: []Option{WithHTTPClient(custom), WithTimeout(5 * time.Second)},
+			},
+			{
+				name: "timeout_before_http_client",
+				opts: []Option{WithTimeout(5 * time.Second), WithHTTPClient(custom)},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				c, err := NewEUClient("testAPIkey", tt.opts...)
+				if err != nil {
+					t.Fatalf("NewEUClient() unexpected error: %v", err)
+				}
+
+				if c.c == custom {
+					t.Fatal("c.c is the caller's *http.Client, want a copy")
+				}
+
+				if c.c.Transport != http.RoundTripper(rt) {
+					t.Fatalf("c.c.Transport = %#v, want the custom transport", c.c.Transport)
+				}
+
+				if got, want := c.c.Timeout, 5*time.Second; got != want {
+					t.Fatalf("c.c.Timeout = %s, want %s", got, want)
+				}
+
+				if got, want := custom.Timeout, time.Minute; got != want {
+					t.Fatalf("custom.Timeout = %s, want %s: the caller's client was modified", got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("zero_means_no_limit", func(t *testing.T) {
+		custom := &http.Client{Timeout: time.Minute}
+
+		c, err := NewClient("testAPIkey", WithHTTPClient(custom), WithTimeout(0))
+		if err != nil {
+			t.Fatalf("NewClient() unexpected error: %v", err)
+		}
+
+		if c.c.Timeout != 0 {
+			t.Fatalf("c.c.Timeout = %s, want 0", c.c.Timeout)
+		}
+
+		if got, want := custom.Timeout, time.Minute; got != want {
+			t.Fatalf("custom.Timeout = %s, want %s: the caller's client was modified", got, want)
+		}
+	})
+
+	t.Run("without_option", func(t *testing.T) {
+		c, err := NewClient("testAPIkey")
+		if err != nil {
+			t.Fatalf("NewClient() unexpected error: %v", err)
+		}
+
+		if c.c.Timeout != 0 {
+			t.Fatalf("c.c.Timeout = %s, want 0", c.c.Timeout)
+		}
+	})
+}
+
+// TestClient_WithTimeout_request sends requests to a server that only answers
+// once the client has given up, and checks that every lookup fails with a
+// timeout error instead of waiting for that answer.
+func TestClient_WithTimeout_request(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// reading the body lets the server notice the client going away, and
+		// cancel r.Context(), while the handler waits
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+			_, _ = io.WriteString(w, testJSONValid)
+		}
+	}))
+	defer server.Close()
+
+	c, err := NewClient("testAPIkey", WithTimeout(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewClient() unexpected error: %v", err)
+	}
+
+	c.e = server.URL + "/"
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Lookup",
+			call: func() error {
+				_, err := c.Lookup("8.8.8.8")
+				return err
+			},
+		},
+		{
+			name: "LookupFields",
+			call: func() error {
+				_, err := c.LookupFields("8.8.8.8", []string{"ip"})
+				return err
+			},
+		},
+		{
+			name: "BulkLookup",
+			call: func() error {
+				_, err := c.BulkLookup([]string{"1.1.1.1", "8.8.8.8"})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatalf("%s() returned no error, want a timeout", tt.name)
+			}
+
+			var nerr net.Error
+			if !errors.As(err, &nerr) || !nerr.Timeout() {
+				t.Fatalf("%s() error = %v, want an error whose Timeout() reports true", tt.name, err)
+			}
+		})
+	}
+}

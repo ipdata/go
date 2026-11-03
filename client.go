@@ -54,6 +54,27 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
+// WithTimeout sets a time limit for every request made through the Client, by
+// setting Timeout on the *http.Client it uses. The limit covers the whole
+// request, from dialling the connection to the end of reading the response
+// body, including the body of a response returned by RawLookup or
+// RawBulkLookup. Without this option no overall limit is set and a request is
+// bounded only by the context passed to the WithContext methods; a context
+// deadline and the time limit combine, and the earlier one wins. A request
+// that exceeds the limit fails with an error whose Timeout method reports
+// true, and a bulk lookup is never replayed after a timeout.
+//
+// The limit is applied once all options have been processed, so it also
+// covers an *http.Client supplied with WithHTTPClient, whatever the order of
+// the options: the Client then uses a copy of that *http.Client with Timeout
+// set, and the caller's value is left untouched. A zero d means no limit.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		c.timeout = d
+		c.hasTimeout = true
+	}
+}
+
 // Client is the struct to represent the functionality presented by the
 // https://ipdata.co API.
 //
@@ -68,26 +89,17 @@ type Client struct {
 	c *http.Client // http client
 	e string       // api endpoint
 	k string       // api key
+
+	// timeout is the request time limit given to WithTimeout, and hasTimeout
+	// records that the option was used at all; newClient applies it to c.
+	timeout    time.Duration
+	hasTimeout bool
 }
 
 // NewClient takes an API key and optional Options, and returns a Client that
 // uses the default endpoint (https://api.ipdata.co/).
 func NewClient(apiKey string, opts ...Option) (Client, error) {
-	if len(apiKey) == 0 {
-		return Client{}, errAPIKey
-	}
-
-	c := Client{
-		c: newHTTPClient(),
-		e: apiEndpoint,
-		k: apiKey,
-	}
-
-	for _, opt := range opts {
-		opt(&c)
-	}
-
-	return c, nil
+	return newClient(apiEndpoint, apiKey, opts)
 }
 
 // NewEUClient takes an API key and optional Options, and returns a Client that
@@ -95,18 +107,32 @@ func NewClient(apiKey string, opts ...Option) (Client, error) {
 // requests are routed through EU data centers only (Frankfurt, Paris, Ireland),
 // which can be useful for GDPR compliance.
 func NewEUClient(apiKey string, opts ...Option) (Client, error) {
+	return newClient(euAPIEndpoint, apiKey, opts)
+}
+
+// newClient builds a Client for endpoint, applies the options and then the
+// request time limit set with WithTimeout, if any.
+func newClient(endpoint, apiKey string, opts []Option) (Client, error) {
 	if len(apiKey) == 0 {
 		return Client{}, errAPIKey
 	}
 
 	c := Client{
 		c: newHTTPClient(),
-		e: euAPIEndpoint,
+		e: endpoint,
 		k: apiKey,
 	}
 
 	for _, opt := range opts {
 		opt(&c)
+	}
+
+	if c.hasTimeout && c.c != nil {
+		// work on a copy: an *http.Client supplied through WithHTTPClient
+		// may be shared with other users
+		hc := *c.c
+		hc.Timeout = c.timeout
+		c.c = &hc
 	}
 
 	return c, nil
