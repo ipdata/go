@@ -63,6 +63,51 @@ func main() {
 }
 ```
 
+### Connection reuse and HTTP/2
+
+A `Client` keeps a persistent HTTPS connection pool for as long as it lives.
+Create one client per process (or one per API key or endpoint), keep it, and
+reuse it for every lookup: each new client pays a fresh TLS handshake.
+Requests to api.ipdata.co are multiplexed over HTTP/2 when the platform
+negotiates it, and fall back to HTTP/1.1 keep-alive otherwise.
+
+A `Client` is safe for concurrent use from multiple goroutines, so one
+package-level or injected instance can serve all of them. Pooled connections
+are closed after 60 seconds idle, idle HTTP/2 connections are health-checked
+with a PING every 30 seconds, and TCP keepalive probes run every 30 seconds.
+Call `client.CloseIdleConnections()` at shutdown (or before a long idle period)
+to release the pooled connections eagerly; the client stays usable afterwards.
+
+```go
+var client ipdata.Client
+
+func main() {
+	var err error
+
+	client, err = ipdata.NewClient("YOUR_API_KEY")
+	if err != nil {
+		panic(err)
+	}
+	defer client.CloseIdleConnections()
+
+	// Every lookup made through client reuses the same pooled connections.
+	data, err := client.Lookup("8.8.8.8")
+	// ...
+}
+```
+
+Bulk lookups are `POST` requests, which `net/http` does not replay on its own
+once they were written to a connection. The client therefore retries a bulk
+request exactly once when a pooled connection turns out to be dead before any
+byte of the response arrived; it never retries after a response started to
+arrive, on an HTTP error status, or after a cancellation or timeout.
+
+If you supply your own `*http.Client` with `WithHTTPClient`, connection reuse
+follows the settings of its transport. `net/http` switches its automatic HTTP/2
+setup off when an `http.Transport` sets a custom `DialContext` or
+`TLSClientConfig`, so set `ForceAttemptHTTP2: true` on such a transport (the
+default transport already does) to keep speaking HTTP/2 to api.ipdata.co.
+
 ### EU Endpoint (GDPR Compliance)
 
 For GDPR compliance, use `NewEUClient` to route all requests through EU data

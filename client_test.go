@@ -5,7 +5,10 @@
 package ipdata
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1913,3 +1917,449 @@ const testBulkJSONWithLocalhost = `[
     "message": "127.0.0.1 is a private IP address"
   }
 ]`
+
+// roundTripperFunc adapts a function to http.RoundTripper. It deliberately has
+// no CloseIdleConnections method.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// connCounter counts the TCP connections an *http.Server accepted.
+type connCounter struct {
+	n atomic.Int32
+}
+
+func (cc *connCounter) connState(_ net.Conn, s http.ConnState) {
+	if s == http.StateNew {
+		cc.n.Add(1)
+	}
+}
+
+// testReuseHandler serves canned lookup, error and bulk responses without
+// checking the API key.
+func testReuseHandler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/76.14.47.42", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testJSONValid)
+	})
+
+	mux.HandleFunc("/192.168.0.1", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message": "192.168.0.1 is a private IP address"}`)
+	})
+
+	mux.HandleFunc("/bulk", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, testBulkJSONValid)
+	})
+
+	return mux
+}
+
+// trustServerCert makes the transport of hc trust the certificate of the
+// httptest TLS server srv. It must run before hc sends its first request.
+func trustServerCert(t *testing.T, hc *http.Client, srv *httptest.Server) {
+	t.Helper()
+
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("hc.Transport is %T, want *http.Transport", hc.Transport)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool}
+}
+
+func Test_newHTTPClient_transport(t *testing.T) {
+	tr, ok := newHTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("newHTTPClient().Transport is not an *http.Transport")
+	}
+
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("tr.ForceAttemptHTTP2 = false, want true")
+	}
+
+	if tr.HTTP2 == nil {
+		t.Fatal("tr.HTTP2 = nil, want HTTP/2 keepalive configuration")
+	}
+
+	if got, want := tr.HTTP2.SendPingTimeout, 30*time.Second; got != want {
+		t.Errorf("tr.HTTP2.SendPingTimeout = %s, want %s", got, want)
+	}
+
+	if got, want := tr.HTTP2.PingTimeout, 15*time.Second; got != want {
+		t.Errorf("tr.HTTP2.PingTimeout = %s, want %s", got, want)
+	}
+
+	if got, want := tr.IdleConnTimeout, 60*time.Second; got != want {
+		t.Errorf("tr.IdleConnTimeout = %s, want %s", got, want)
+	}
+
+	if tr.Proxy == nil {
+		t.Error("tr.Proxy = nil, want http.ProxyFromEnvironment")
+	}
+}
+
+func Test_newHTTPClient_http2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(testReuseHandler())
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	hc := newHTTPClient()
+	trustServerCert(t, hc, srv)
+
+	c := Client{c: hc, e: srv.URL + "/", k: "testAPIkey"}
+
+	resp, err := c.RawLookup("76.14.47.42")
+	if err != nil {
+		t.Fatalf("RawLookup() unexpected error: %v", err)
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.Proto != "HTTP/2.0" {
+		t.Fatalf("resp.Proto = %q, want %q", resp.Proto, "HTTP/2.0")
+	}
+
+	if resp.TLS == nil {
+		t.Fatal("resp.TLS = nil, want the TLS connection state")
+	}
+
+	if resp.TLS.NegotiatedProtocol != "h2" {
+		t.Fatalf("resp.TLS.NegotiatedProtocol = %q, want %q", resp.TLS.NegotiatedProtocol, "h2")
+	}
+
+	ip, err := c.Lookup("76.14.47.42")
+	if err != nil {
+		t.Fatalf("Lookup() unexpected error: %v", err)
+	}
+
+	if ip.IP != "76.14.47.42" {
+		t.Fatalf("ip.IP = %q, want %q", ip.IP, "76.14.47.42")
+	}
+}
+
+func Test_client_connectionReuse(t *testing.T) {
+	tests := []struct {
+		name  string
+		tls   bool
+		proto string
+	}{
+		{name: "http1_keepalive", proto: "HTTP/1.1"},
+		{name: "https_http2", tls: true, proto: "HTTP/2.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var conns connCounter
+
+			srv := httptest.NewUnstartedServer(testReuseHandler())
+			srv.Config.ConnState = conns.connState
+
+			hc := newHTTPClient()
+
+			if tt.tls {
+				srv.EnableHTTP2 = true
+				srv.StartTLS()
+				trustServerCert(t, hc, srv)
+			} else {
+				srv.Start()
+			}
+
+			defer srv.Close()
+
+			c := Client{c: hc, e: srv.URL + "/", k: "testAPIkey"}
+
+			for i := 0; i < 5; i++ {
+				if _, err := c.Lookup("76.14.47.42"); err != nil {
+					t.Fatalf("Lookup() #%d unexpected error: %v", i+1, err)
+				}
+			}
+
+			// error responses must hand their connection back as well
+			if _, err := c.Lookup("192.168.0.1"); err == nil {
+				t.Fatal("Lookup() of a private address: error expected but was nil")
+			}
+
+			if _, err := c.RawLookup("192.168.0.1"); err == nil {
+				t.Fatal("RawLookup() of a private address: error expected but was nil")
+			}
+
+			for i := 0; i < 3; i++ {
+				if _, err := c.BulkLookup([]string{"1.1.1.1", "8.8.8.8"}); err != nil {
+					t.Fatalf("BulkLookup() #%d unexpected error: %v", i+1, err)
+				}
+			}
+
+			resp, err := c.RawLookup("76.14.47.42")
+			if err != nil {
+				t.Fatalf("RawLookup() unexpected error: %v", err)
+			}
+
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+
+			if resp.Proto != tt.proto {
+				t.Errorf("resp.Proto = %q, want %q", resp.Proto, tt.proto)
+			}
+
+			if n := conns.n.Load(); n != 1 {
+				t.Fatalf("server accepted %d connections for 11 sequential requests, want 1", n)
+			}
+
+			// closing the idle connection forces the next request to dial again
+			c.CloseIdleConnections()
+
+			if _, err := c.Lookup("76.14.47.42"); err != nil {
+				t.Fatalf("Lookup() after CloseIdleConnections() unexpected error: %v", err)
+			}
+
+			if n := conns.n.Load(); n != 2 {
+				t.Fatalf("server accepted %d connections after CloseIdleConnections(), want 2", n)
+			}
+		})
+	}
+}
+
+func TestClient_CloseIdleConnections(t *testing.T) {
+	// a zero Client has no *http.Client and must not panic
+	Client{}.CloseIdleConnections()
+
+	// no Transport: delegates to http.DefaultTransport
+	c, err := NewClient("testAPIkey", WithHTTPClient(&http.Client{}))
+	if err != nil {
+		t.Fatalf("NewClient() unexpected error: %v", err)
+	}
+
+	c.CloseIdleConnections()
+
+	// a transport without a CloseIdleConnections method is a no-op
+	rt := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	c, err = NewEUClient("testAPIkey", WithHTTPClient(&http.Client{Transport: rt}))
+	if err != nil {
+		t.Fatalf("NewEUClient() unexpected error: %v", err)
+	}
+
+	c.CloseIdleConnections()
+}
+
+// actions of a scriptedServer, one per request received
+const (
+	srvRespond = iota // answer with 200 and the configured body
+	srvDrop           // read the request, then close the connection without answering
+	srvPartial        // write the start of a response, then close the connection
+	srvReject         // answer with a 403 API error
+)
+
+// scriptedServer is a raw HTTP/1.1 keep-alive server that follows a
+// per-request script, so a test can drop a pooled connection at a precise
+// point. Requests beyond the script are answered normally.
+type scriptedServer struct {
+	ln     net.Listener
+	body   string
+	script []int
+	conns  atomic.Int32
+	reqs   atomic.Int32
+}
+
+func newScriptedServer(t *testing.T, body string, script ...int) *scriptedServer {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() unexpected error: %v", err)
+	}
+
+	s := &scriptedServer{ln: ln, body: body, script: script}
+
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			s.conns.Add(1)
+
+			go s.serve(conn)
+		}
+	}()
+
+	return s
+}
+
+func (s *scriptedServer) url() string {
+	return "http://" + s.ln.Addr().String() + "/"
+}
+
+func (s *scriptedServer) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	br := bufio.NewReader(conn)
+
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+
+		n := int(s.reqs.Add(1)) - 1
+
+		action := srvRespond
+		if n < len(s.script) {
+			action = s.script[n]
+		}
+
+		switch action {
+		case srvDrop:
+			return
+		case srvPartial:
+			_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+			return
+		case srvReject:
+			const msg = `{"message":"rejected"}`
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(msg), msg)
+		default:
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(s.body), s.body)
+		}
+	}
+}
+
+func TestClient_BulkLookup_staleConnectionRetry(t *testing.T) {
+	ips := []string{"1.1.1.1", "8.8.8.8"}
+
+	tests := []struct {
+		name      string
+		script    []int
+		wantErr   string // substring of the second call's error, empty for success
+		wantReqs  int32
+		wantConns int32
+	}{
+		{
+			// The pooled connection dies after the request was written and
+			// before any response byte: the POST is replayed once, on a
+			// fresh connection.
+			name:      "reused_connection_dropped_is_retried_once",
+			script:    []int{srvRespond, srvDrop, srvRespond},
+			wantReqs:  3,
+			wantConns: 2,
+		},
+		{
+			// The replay fails as well, on a connection that was not reused:
+			// no further attempt is made.
+			name:      "retry_happens_at_most_once",
+			script:    []int{srvRespond, srvDrop, srvDrop},
+			wantErr:   `http request to "` + "http://",
+			wantReqs:  3,
+			wantConns: 2,
+		},
+		{
+			// A response that started to arrive is never replayed.
+			name:      "no_retry_after_response_bytes",
+			script:    []int{srvRespond, srvPartial},
+			wantErr:   `http request to "` + "http://",
+			wantReqs:  2,
+			wantConns: 1,
+		},
+		{
+			// An HTTP error status is never replayed.
+			name:      "no_retry_on_http_status",
+			script:    []int{srvRespond, srvReject},
+			wantErr:   "rejected",
+			wantReqs:  2,
+			wantConns: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newScriptedServer(t, testBulkJSONValid, tt.script...)
+
+			client := &Client{c: newHTTPClient(), e: srv.url(), k: "testAPIkey"}
+			defer client.CloseIdleConnections()
+
+			// the first call leaves one kept-alive connection in the pool
+			if _, err := client.BulkLookup(ips); err != nil {
+				t.Fatalf("first BulkLookup() unexpected error: %v", err)
+			}
+
+			got, err := client.BulkLookup(ips)
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("second BulkLookup() unexpected error: %v", err)
+				}
+
+				if len(got) != 2 || got[0] == nil || got[0].IP != "1.1.1.1" || got[1] == nil || got[1].IP != "8.8.8.8" {
+					t.Fatalf("second BulkLookup() = %v, want the two canned results", got)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("second BulkLookup(): error expected but was nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("second BulkLookup() error = %q, should contain %q", err, tt.wantErr)
+				}
+			}
+
+			if n := srv.reqs.Load(); n != tt.wantReqs {
+				t.Errorf("server received %d requests, want %d", n, tt.wantReqs)
+			}
+
+			if n := srv.conns.Load(); n != tt.wantConns {
+				t.Errorf("server accepted %d connections, want %d", n, tt.wantConns)
+			}
+		})
+	}
+}
+
+func TestClient_BulkLookup_freshConnectionNotRetried(t *testing.T) {
+	ips := []string{"1.1.1.1", "8.8.8.8"}
+
+	// the very first connection is dropped: a failure on a connection that was
+	// never used before is not retried
+	srv := newScriptedServer(t, testBulkJSONValid, srvDrop, srvRespond)
+
+	client := &Client{c: newHTTPClient(), e: srv.url(), k: "testAPIkey"}
+	defer client.CloseIdleConnections()
+
+	if _, err := client.BulkLookup(ips); err == nil {
+		t.Fatal("first BulkLookup(): error expected but was nil")
+	}
+
+	if n := srv.reqs.Load(); n != 1 {
+		t.Fatalf("server received %d requests after the failed call, want 1", n)
+	}
+
+	// the client is still usable afterwards
+	got, err := client.BulkLookup(ips)
+	if err != nil {
+		t.Fatalf("second BulkLookup() unexpected error: %v", err)
+	}
+
+	if len(got) != 2 || got[0] == nil || got[0].IP != "1.1.1.1" {
+		t.Fatalf("second BulkLookup() = %v, want the two canned results", got)
+	}
+
+	if n := srv.conns.Load(); n != 2 {
+		t.Fatalf("server accepted %d connections, want 2", n)
+	}
+}
